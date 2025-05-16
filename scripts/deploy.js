@@ -151,11 +151,11 @@ async function setupDiscordWebhook() {
 
 // Check and set up Discord role tag
 async function setupDiscordRoleTag() {
-  let roleTag = process.env.DISCORD_ROLE_TAG;
+  let roleTag = process.env.DISCORD_ROLE_ID;
   if (roleTag) {
-    console.log("ℹ️ Using DISCORD_ROLE_TAG from environment");
+    console.log("ℹ️ Using DISCORD_ROLE_ID from environment");
     try {
-      execSync(`echo '${roleTag}' | npx wrangler secret put DISCORD_ROLE_TAG`, {
+      execSync(`echo '${roleTag}' | npx wrangler secret put DISCORD_ROLE_ID`, {
         stdio: "inherit"
       });
       console.log("✅ Discord role tag set from environment");
@@ -165,14 +165,14 @@ async function setupDiscordRoleTag() {
     }
   } else {
     try {
-      execSync("npx wrangler secret get DISCORD_ROLE_TAG", {
+      execSync("npx wrangler secret get DISCORD_ROLE_ID", {
         stdio: "ignore",
       });
       console.log("✅ Discord role tag is already set");
     } catch (error) {
       const roleTag = await prompt("Enter your Discord role ID to mention (without @ symbol): ");
       try {
-        execSync(`echo '${roleTag}' | npx wrangler secret put DISCORD_ROLE_TAG`, {
+        execSync(`echo '${roleTag}' | npx wrangler secret put DISCORD_ROLE_ID`, {
           stdio: "inherit"
         });
         console.log("✅ Discord role tag set successfully");

@@ -1,4 +1,4 @@
-# DNS Monitor Bot
+# DNS Monitor Bot - Discord Edition
 
 A simple to configure, pre-built Cloudflare Worker that monitors DNS records for any list of user-specified domains and sends notifications via Discord when changes are detected.
 
@@ -21,7 +21,7 @@ The project is designed to stay comfortably within Cloudflare's free tier for it
 1. **Clone the repository:**
 
    ```bash
-   git clone https://github.com/wavey0x/dns-bot.git
+   git clone https://github.com/naouflex/dns-bot.git
    cd dns-bot
    ```
 
@@ -56,6 +56,8 @@ The project is designed to stay comfortably within Cloudflare's free tier for it
    - Get your Cloudflare API token[^2]
    
    - Create a Discord webhook[^3]
+
+   - Get your Discord role id from the Discord server you want to monitor[^4]
 
 4. **Deploy the bot:**
 
@@ -98,7 +100,7 @@ To view the logs for your deployed worker:
 
 ## Footnotes
 
-[^1]: Required secrets must be set in both your local `.env` file and GitHub Actions repository secrets. Go to your repository's Settings > Secrets and variables > Actions and add: `CLOUDFLARE_API_TOKEN` and `DISCORD_WEBHOOK_URL`.
+[^1]: Required secrets must be set in both your local `.env` file and GitHub Actions repository secrets. Go to your repository's Settings > Secrets and variables > Actions and add: `CLOUDFLARE_API_TOKEN`, `DISCORD_WEBHOOK_URL`, and `DISCORD_ROLE_ID`.
 
 [^2]: To get your Cloudflare API token:
 
@@ -122,3 +124,9 @@ To view the logs for your deployed worker:
     5. Select the channel where notifications should be sent
     6. Click "Copy Webhook URL"
     7. Paste this URL as your `DISCORD_WEBHOOK_URL` in the `.env` file and GitHub secrets
+
+[^4]: To get your Discord role id:
+
+    1. Open Discord and go to the server where you want to receive notifications
+    2. Go to Server Settings > Roles
+    3. Hover over the role you want to monitor and click "Copy ID"

@@ -2,7 +2,7 @@ interface Env {
   DNS_KV: KVNamespace;
   MONITOR_DOMAINS: string; // Comma-separated list of domains
   DISCORD_WEBHOOK_URL: string; // Changed from Telegram variables
-  DISCORD_ROLE_TAG: string; // Added this for the role mention tag
+  DISCORD_ROLE_ID: string; // Added this for the role mention tag
   WORKER_VERSION_ID?: string; // Optional version ID from deployment
 }
 
@@ -276,7 +276,7 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
         }
       ];
 
-      await sendDiscordMessage(env, embed, `<@&${env.DISCORD_ROLE_TAG}>`);
+      await sendDiscordMessage(env, embed, `<@&${env.DISCORD_ROLE_ID}>`);
       console.log(`DNS change detected for ${domain}:`);
       console.log(`Previous IPs: ${previousIPs || "none"}`);
       console.log(`New IPs: ${currentIPs.join(", ")}`);
@@ -368,8 +368,8 @@ export default {
       return;
     }
 
-    if (!env.DISCORD_ROLE_TAG) {
-      console.error("Discord role tag is missing. Please set DISCORD_ROLE_TAG");
+    if (!env.DISCORD_ROLE_ID) {
+      console.error("Discord role tag is missing. Please set DISCORD_ROLE_ID");
       return;
     }
 
