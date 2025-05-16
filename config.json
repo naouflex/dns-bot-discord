@@ -1,0 +1,10 @@
+{
+  "domains": [
+    "inverse.finance",
+    "curve.finance"
+  ],
+  "cron": "* * * * *",
+  "kvNamespace": {
+    "id": "9c9e35db9cdf483784ccdadd5bdd24a7"
+  }
+}
