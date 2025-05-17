@@ -386,6 +386,9 @@ export default {
       if (existingVersion !== env.WORKER_VERSION_ID) {
         console.log(`New deployment detected! Version ID: ${env.WORKER_VERSION_ID}`);
         
+        // Split the domains string into an array and trim whitespace
+        const domains = env.MONITOR_DOMAINS.split(",").map((domain) => domain.trim());
+        
         // Send deployment notification via Discord
         const deploymentEmbed = createEmbed('update', 'New Worker Deployment');
         deploymentEmbed.description = "DNS Monitor Worker has been updated with a new deployment";
@@ -399,6 +402,11 @@ export default {
             name: "New Version",
             value: env.WORKER_VERSION_ID,
             inline: true
+          },
+          {
+            name: "Monitored Domains",
+            value: domains.map(d => `\`${d}\``).join(", ") || "None configured",
+            inline: false
           },
           {
             name: "Deployment Time",
