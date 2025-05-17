@@ -1,7 +1,9 @@
 {
   "domains": [
     "inverse.finance",
-    "curve.finance"
+    "curve.finance",
+    "inverse.watch",
+    "app.safe.global"
   ],
   "cron": "* * * * *",
   "kvNamespace": {
