@@ -90,6 +90,42 @@ To view the logs for your deployed worker:
 3. Select your worker (`dns-bot`).
 4. Click on **Logs** to view the worker's logs.
 
+## Alerting
+
+The DNS Monitor Bot sends several types of notifications to your Discord channel:
+
+### DNS Change Detected (Orange)
+Triggered when IP addresses for a domain change. Includes:
+- Previous and new IP addresses
+- TTL information
+- DNS status
+- SOA serial number, primary nameserver, and admin email
+- Mentions the specified Discord role to alert team members
+
+### DNS Zone Updated (Light Blue)
+Triggered when the SOA record changes but IP addresses remain the same. Includes:
+- Previous and new SOA serial numbers 
+- Primary nameserver information
+- Admin email
+- Zone timing parameters (refresh, retry, expire, minimum TTL)
+
+### DNS Authority Unreachable (Yellow)
+Triggered when the DNS authority for a domain becomes unreachable. Includes:
+- Domain name
+- Status information
+- DNS comments from the resolver
+
+### Error Monitoring DNS (Red)
+Triggered when there's an error checking a domain. Includes:
+- Error details
+- Timestamp of the error
+
+### New Worker Deployment (Light Blue)
+Triggered when a new version of the worker is deployed. Includes:
+- Previous and new version IDs
+- List of monitored domains
+- Deployment timestamp
+
 ## Troubleshooting
 
 - **Wrangler not found:** Ensure Wrangler is installed globally or use `npx wrangler`.
