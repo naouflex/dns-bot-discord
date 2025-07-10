@@ -871,8 +871,8 @@ async function discoverSubdomainsFromCT(domain: string, quickMode: boolean = fal
     ctSources.push(`https://crt.sh/?q=${encodeURIComponent(domain)}&deduplicate=Y&output=json`);
   }
   
-  const timeout = quickMode ? 3000 : 8000; // More time when not in quick mode
-  const maxResults = quickMode ? 200 : 1000; // More results when not in quick mode
+  const timeout = quickMode ? 2000 : 8000; // Aggressive timeout for quick mode (Discord responsiveness)
+  const maxResults = quickMode ? 100 : 1000; // Fewer results in quick mode for faster response
   
   console.log(`🔍 Querying Certificate Transparency logs for ${domain} (${quickMode ? 'quick' : 'thorough'} mode)...`);
   
@@ -1072,10 +1072,10 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
   const currentDomains = await getDynamicDomains(env);
   
   try {
-    // Adaptive timeout based on verify mode
+    // Adaptive timeout based on verify mode  
     const quickMode = !verifyAll; // Quick mode when not verifying all
-    const maxDiscoveryTime = quickMode ? 5000 : 15000; // 5s quick, 15s thorough
-    const maxDomains = quickMode ? 100 : 500; // More domains in thorough mode
+    const maxDiscoveryTime = quickMode ? 4000 : 15000; // 4s quick, 15s thorough (more aggressive for Discord)
+    const maxDomains = quickMode ? 50 : 500; // Fewer domains in quick mode to avoid timeout
     
     console.log(`🔍 Starting subdomain discovery for ${domain} (${quickMode ? 'quick' : 'thorough'} mode)`);
     const discoveryStartTime = Date.now();
@@ -1152,18 +1152,32 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
         // Verification strategy
         let shouldAdd = false;
         
-        if (!verifyAll && allDiscoveredDomains.size > 20) {
-          // Skip verification for large CT discovery sets to save time
+        if (!verifyAll && (allDiscoveredDomains.size > 10 || quickMode)) {
+          // Skip verification for large CT discovery sets or in quick mode to save time
           shouldAdd = true;
-          console.log(`🚀 Added without verification (large set): ${checkDomain}`);
+          console.log(`🚀 Added without verification (${quickMode ? 'quick mode' : 'large set'}): ${checkDomain}`);
         } else {
-          // Verify domain resolution
-          const exists = await checkSubdomainExists(checkDomain);
-          shouldAdd = exists;
-          if (exists) {
-            console.log(`✅ Verified active: ${checkDomain}`);
-          } else {
-            console.log(`⏭️ Not resolving: ${checkDomain}`);
+          // Verify domain resolution with timeout
+          try {
+            const exists = await Promise.race([
+              checkSubdomainExists(checkDomain),
+              new Promise<boolean>((_, reject) => 
+                setTimeout(() => reject(new Error('DNS check timeout')), 2000)
+              )
+            ]);
+            shouldAdd = exists;
+            if (exists) {
+              console.log(`✅ Verified active: ${checkDomain}`);
+            } else {
+              console.log(`⏭️ Not resolving: ${checkDomain}`);
+            }
+          } catch (dnsError) {
+            console.log(`⚠️ DNS check failed for ${checkDomain}: ${dnsError instanceof Error ? dnsError.message : String(dnsError)}`);
+            // In quick mode, assume it exists if we can't verify quickly
+            shouldAdd = quickMode;
+            if (shouldAdd) {
+              console.log(`🚀 Added without verification (DNS timeout): ${checkDomain}`);
+            }
           }
         }
         
@@ -1545,6 +1559,12 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
     };
   }
 
+  // Always defer response to avoid Discord timeout
+  const deferResponse = {
+    type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    data: {}
+  };
+
   try {
     // First check if root domain is already being monitored
     const domains = await getDynamicDomains(env);
@@ -1553,10 +1573,21 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
     
     const rootAlreadyExists = allCurrentDomains.includes(domain);
 
-    // Discover subdomains with timeout handling
+    // Discover subdomains with aggressive timeout for Discord responsiveness
     let discovery;
     try {
-      discovery = await discoverSubdomains(domain, env, verifyAll);
+      console.log(`🔍 Starting quick subdomain discovery for ${domain}...`);
+      discovery = await Promise.race([
+        discoverSubdomains(domain, env, verifyAll),
+        new Promise<{
+          existing: string[];
+          added: string[];
+          skipped: string[];
+          errors: string[];
+        }>((_, reject) => 
+          setTimeout(() => reject(new Error('Discovery timeout after 8 seconds')), 8000)
+        )
+      ]);
     } catch (discoveryError) {
       console.error('Subdomain discovery failed:', discoveryError);
       // Fallback: just add the root domain
@@ -1660,21 +1691,50 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
     
     embed.fields = fields;
 
-    return {
-      type: 4,
-      data: {
+    // Send followup response to the deferred interaction
+    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
+    
+    await fetch(followupUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
         embeds: [embed]
-      }
-    };
+      })
+    });
+
+    return deferResponse;
+    
   } catch (error) {
     console.error("Error in subdomain discovery:", error);
-    return {
-      type: 4,
-      data: {
-        content: `❌ Failed to discover subdomains: ${error instanceof Error ? error.message : String(error)}`,
-        flags: 64
-      }
-    };
+    
+    // Try to send error as followup
+    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
+    
+    try {
+      await fetch(followupUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          content: `❌ Failed to discover subdomains: ${error instanceof Error ? error.message : String(error)}`
+        })
+      });
+      
+      return deferResponse;
+    } catch (followupError) {
+      // If we can't send followup, return error response directly
+      console.error("Failed to send followup error:", followupError);
+      return {
+        type: 4,
+        data: {
+          content: `❌ Failed to discover subdomains: ${error instanceof Error ? error.message : String(error)}`,
+          flags: 64
+        }
+      };
+    }
   }
 }
 
