@@ -157,6 +157,24 @@ const DISCORD_COMMANDS = [
         required: true
       }
     ]
+  },
+  {
+    name: "dampening",
+    description: "Check or clear DNS change notification dampening for a domain",
+    options: [
+      {
+        name: "domain",
+        description: "Domain name to check dampening status",
+        type: 3, // STRING
+        required: true
+      },
+      {
+        name: "clear",
+        description: "Clear dampening to allow immediate notifications",
+        type: 5, // BOOLEAN
+        required: false
+      }
+    ]
   }
 ];
 
@@ -272,6 +290,96 @@ async function queryDNS(domain: string): Promise<DNSResponse> {
   };
 }
 
+async function shouldSendDNSChangeNotification(env: Env, domain: string, currentIPs: string[], ttl: number): Promise<boolean> {
+  try {
+    const now = Date.now();
+    
+    // Get last notification time for this domain
+    const lastNotificationKey = `notify:${domain}:last`;
+    const lastNotificationTime = await env.DNS_KV.get(lastNotificationKey);
+    const lastNotifyTime = lastNotificationTime ? parseInt(lastNotificationTime) : 0;
+    
+    // Get recent IP sets for this domain (track oscillation)
+    const recentIPsKey = `notify:${domain}:recent_ips`;
+    const recentIPsData = await env.DNS_KV.get(recentIPsKey);
+    const recentIPSets: Array<{ips: string[], timestamp: number}> = recentIPsData ? JSON.parse(recentIPsData) : [];
+    
+    // Calculate dampening period based on TTL
+    let dampeningPeriod: number;
+    if (ttl < 60) {
+      dampeningPeriod = 10 * 60 * 1000; // 10 minutes for very short TTL
+    } else if (ttl < 300) {
+      dampeningPeriod = 5 * 60 * 1000; // 5 minutes for short TTL  
+    } else if (ttl < 900) {
+      dampeningPeriod = Math.max(ttl * 2 * 1000, 2 * 60 * 1000); // 2x TTL or 2 minutes minimum
+    } else {
+      dampeningPeriod = Math.max(ttl * 1000, 5 * 60 * 1000); // 1x TTL or 5 minutes minimum
+    }
+    
+    // Check if enough time has passed since last notification
+    const timeSinceLastNotify = now - lastNotifyTime;
+    if (timeSinceLastNotify < dampeningPeriod) {
+      console.log(`🔇 Dampening: Only ${Math.round(timeSinceLastNotify/1000)}s since last notify, need ${Math.round(dampeningPeriod/1000)}s`);
+      
+      // Still update recent IPs tracking without notifying
+      await updateRecentIPTracking(env, domain, currentIPs, now);
+      return false;
+    }
+    
+    // Check if this IP set was seen recently (oscillation detection)
+    const currentIPSet = currentIPs.sort().join(',');
+    const recentIPSet = recentIPSets.find(set => 
+      set.ips.sort().join(',') === currentIPSet && 
+      (now - set.timestamp) < 24 * 60 * 60 * 1000 // Within last 24 hours
+    );
+    
+    if (recentIPSet && recentIPSets.length > 1) {
+      console.log(`🔄 Oscillation detected: IP set seen ${Math.round((now - recentIPSet.timestamp) / (60 * 1000))} minutes ago`);
+      
+      // For oscillating IPs, use longer dampening period
+      const oscillationDampening = Math.max(dampeningPeriod * 2, 15 * 60 * 1000); // 2x normal or 15 minutes
+      if (timeSinceLastNotify < oscillationDampening) {
+        console.log(`🔇 Oscillation dampening: Need ${Math.round(oscillationDampening/1000)}s between notifications`);
+        await updateRecentIPTracking(env, domain, currentIPs, now);
+        return false;
+      }
+    }
+    
+    // Should send notification - update tracking
+    await env.DNS_KV.put(lastNotificationKey, now.toString(), { expirationTtl: 7 * 24 * 60 * 60 }); // 7 days
+    await updateRecentIPTracking(env, domain, currentIPs, now);
+    
+    console.log(`✅ Sending DNS change notification for ${domain} (dampening: ${Math.round(dampeningPeriod/1000)}s)`);
+    return true;
+    
+  } catch (error) {
+    console.error(`Error in dampening logic for ${domain}:`, error);
+    // On error, err on the side of sending notifications
+    return true;
+  }
+}
+
+async function updateRecentIPTracking(env: Env, domain: string, currentIPs: string[], timestamp: number): Promise<void> {
+  try {
+    const recentIPsKey = `notify:${domain}:recent_ips`;
+    const recentIPsData = await env.DNS_KV.get(recentIPsKey);
+    let recentIPSets: Array<{ips: string[], timestamp: number}> = recentIPsData ? JSON.parse(recentIPsData) : [];
+    
+    // Add current IP set
+    recentIPSets.push({ ips: currentIPs.sort(), timestamp });
+    
+    // Keep only last 10 IP sets and remove old ones (> 7 days)
+    const sevenDaysAgo = timestamp - (7 * 24 * 60 * 60 * 1000);
+    recentIPSets = recentIPSets
+      .filter(set => set.timestamp > sevenDaysAgo)
+      .slice(-10); // Keep last 10
+    
+    await env.DNS_KV.put(recentIPsKey, JSON.stringify(recentIPSets), { expirationTtl: 7 * 24 * 60 * 60 }); // 7 days
+  } catch (error) {
+    console.error(`Error updating recent IP tracking for ${domain}:`, error);
+  }
+}
+
 async function checkDomain(domain: string, env: Env): Promise<void> {
   try {
     const dnsData = await queryDNS(domain);
@@ -338,6 +446,9 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
     // Check if this is the first time monitoring this domain
     const isFirstTimeMonitoring = !previousState && !previousIPs && !previousSerial;
     
+    // Get TTL for dampening logic
+    const ttl = aRecords[0]?.TTL || 300;
+    
     // If the IPs have changed
     if (JSON.stringify(previousIPsArray) !== JSON.stringify(currentIPs)) {
       await env.DNS_KV.put(`dns:${domain}:state`, "resolved");
@@ -351,61 +462,70 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
         console.log(`SOA Serial: ${serial}`);
         console.log(`Timestamp: ${new Date().toISOString()}`);
       } else {
-        // Actual change detected - send notification
-        const embed = createEmbed('change', 'DNS Change Detected');
-        embed.description = `IP addresses for \`${domain}\` have changed`;
-        embed.fields = [
-          {
-            name: "Previous IPs",
-            value: previousIPs || "none",
-            inline: false
-          },
-          {
-            name: "New IPs",
-            value: currentIPs.join(", "),
-            inline: false
-          },
-          {
-            name: "TTL",
-            value: `${aRecords[0]?.TTL || "N/A"}`,
-            inline: true
-          },
-          {
-            name: "DNS Status",
-            value: `${dnsData.Status}`,
-            inline: true
-          },
-          {
-            name: "Record Type",
-            value: "A",
-            inline: true
-          },
-          {
-            name: "SOA Serial",
-            value: serial,
-            inline: true
-          },
-          {
-            name: "Primary NS",
-            value: soaData[0] || "unknown",
-            inline: true
-          },
-          {
-            name: "Admin Email",
-            value: soaData[1] || "unknown",
-            inline: true
-          }
-        ];
-
-        // Only add role mention if DISCORD_ROLE_ID is set
-        const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
-        await sendDiscordMessage(env, embed, mentionContent);
+        // Check if we should send a notification (dampening logic)
+        const shouldNotify = await shouldSendDNSChangeNotification(env, domain, currentIPs, ttl);
         
-        console.log(`DNS change detected for ${domain}:`);
-        console.log(`Previous IPs: ${previousIPs || "none"}`);
-        console.log(`New IPs: ${currentIPs.join(", ")}`);
-        console.log(`SOA Serial: ${serial}`);
-        console.log(`Timestamp: ${new Date().toISOString()}`);
+        if (shouldNotify) {
+          // Actual change detected - send notification
+          const embed = createEmbed('change', 'DNS Change Detected');
+          embed.description = `IP addresses for \`${domain}\` have changed`;
+          embed.fields = [
+            {
+              name: "Previous IPs",
+              value: previousIPs || "none",
+              inline: false
+            },
+            {
+              name: "New IPs",
+              value: currentIPs.join(", "),
+              inline: false
+            },
+            {
+              name: "TTL",
+              value: `${ttl}`,
+              inline: true
+            },
+            {
+              name: "DNS Status",
+              value: `${dnsData.Status}`,
+              inline: true
+            },
+            {
+              name: "Record Type",
+              value: "A",
+              inline: true
+            },
+            {
+              name: "SOA Serial",
+              value: serial,
+              inline: true
+            },
+            {
+              name: "Primary NS",
+              value: soaData[0] || "unknown",
+              inline: true
+            },
+            {
+              name: "Admin Email",
+              value: soaData[1] || "unknown",
+              inline: true
+            }
+          ];
+
+          // Only add role mention if DISCORD_ROLE_ID is set
+          const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
+          await sendDiscordMessage(env, embed, mentionContent);
+          
+          console.log(`DNS change detected for ${domain}:`);
+          console.log(`Previous IPs: ${previousIPs || "none"}`);
+          console.log(`New IPs: ${currentIPs.join(", ")}`);
+          console.log(`SOA Serial: ${serial}`);
+          console.log(`Timestamp: ${new Date().toISOString()}`);
+        } else {
+          console.log(`🔇 DNS change detected for ${domain} but notification dampened (TTL: ${ttl}s)`);
+          console.log(`Previous IPs: ${previousIPs || "none"}`);
+          console.log(`New IPs: ${currentIPs.join(", ")}`);
+        }
       }
     } else if (serial !== previousSerial) {
       // Only notify on SOA changes if IPs haven't changed
@@ -1435,6 +1555,150 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
   }
 }
 
+async function handleDampening(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+  const domain = interaction.data?.options?.find(opt => opt.name === "domain")?.value?.toLowerCase();
+  const clear = interaction.data?.options?.find(opt => opt.name === "clear")?.value || false;
+  
+  if (!domain) {
+    return {
+      type: 4,
+      data: {
+        content: "❌ Please provide a domain name.",
+        flags: 64
+      }
+    };
+  }
+
+  try {
+    const now = Date.now();
+    const lastNotificationKey = `notify:${domain}:last`;
+    const recentIPsKey = `notify:${domain}:recent_ips`;
+    
+    // Get current dampening data
+    const lastNotificationTime = await env.DNS_KV.get(lastNotificationKey);
+    const lastNotifyTime = lastNotificationTime ? parseInt(lastNotificationTime) : 0;
+    const recentIPsData = await env.DNS_KV.get(recentIPsKey);
+    const recentIPSets: Array<{ips: string[], timestamp: number}> = recentIPsData ? JSON.parse(recentIPsData) : [];
+    
+    // Clear dampening if requested
+    if (clear) {
+      await env.DNS_KV.delete(lastNotificationKey);
+      await env.DNS_KV.delete(recentIPsKey);
+      
+      const embed = createEmbed('update', 'Dampening Cleared');
+      embed.description = `Cleared DNS change notification dampening for \`${domain}\``;
+      embed.fields = [
+        {
+          name: "Result",
+          value: "Next DNS change will trigger immediate notification",
+          inline: false
+        },
+        {
+          name: "Cleared By",
+          value: interaction.member?.user?.username || interaction.user?.username || "Unknown",
+          inline: true
+        }
+      ];
+      
+      return {
+        type: 4,
+        data: {
+          embeds: [embed]
+        }
+      };
+    }
+    
+    // Show dampening status
+    const embed = createEmbed('update', 'DNS Change Dampening Status');
+    embed.description = `Dampening information for \`${domain}\``;
+    
+    const fields = [];
+    
+    if (lastNotifyTime > 0) {
+      const timeSinceLastNotify = now - lastNotifyTime;
+      const minutesAgo = Math.round(timeSinceLastNotify / (60 * 1000));
+      
+      fields.push({
+        name: "Last Notification",
+        value: `${minutesAgo} minutes ago`,
+        inline: true
+      });
+    } else {
+      fields.push({
+        name: "Last Notification",
+        value: "Never",
+        inline: true
+      });
+    }
+    
+    if (recentIPSets.length > 0) {
+      fields.push({
+        name: "Recent IP Sets",
+        value: `${recentIPSets.length} sets tracked`,
+        inline: true
+      });
+      
+      // Show recent IP changes
+      const recentChanges = recentIPSets
+        .slice(-3)
+        .map(set => {
+          const minutesAgo = Math.round((now - set.timestamp) / (60 * 1000));
+          return `${set.ips.join(", ")} (${minutesAgo}m ago)`;
+        })
+        .join("\n");
+        
+      fields.push({
+        name: "Recent IP Changes",
+        value: recentChanges || "None",
+        inline: false
+      });
+      
+      // Check for oscillation
+      if (recentIPSets.length > 1) {
+        const uniqueIPSets = new Set(recentIPSets.map(set => set.ips.sort().join(',')));
+        if (uniqueIPSets.size < recentIPSets.length) {
+          fields.push({
+            name: "⚠️ Oscillation Detected",
+            value: `Domain switching between ${uniqueIPSets.size} different IP sets`,
+            inline: false
+          });
+        }
+      }
+    } else {
+      fields.push({
+        name: "Recent IP Sets",
+        value: "None tracked",
+        inline: true
+      });
+    }
+    
+    fields.push({
+      name: "Actions",
+      value: "Use `/dampening domain clear:true` to reset dampening",
+      inline: false
+    });
+    
+    embed.fields = fields;
+    
+    return {
+      type: 4,
+      data: {
+        embeds: [embed]
+      }
+    };
+    
+  } catch (error) {
+    console.error("Error checking dampening status:", error);
+    return {
+      type: 4,
+      data: {
+        content: `❌ Failed to check dampening status: ${error instanceof Error ? error.message : String(error)}`,
+        flags: 64
+      }
+    };
+  }
+}
+
 async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
   const botStatus = await getBotStatus(env);
   const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
@@ -1475,6 +1739,11 @@ async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<Di
       inline: false
     },
     {
+      name: "🔇 `/dampening <domain>`",
+      value: "Check or clear DNS change notification dampening\nExample: `/dampening app.example.com`\nClear: `/dampening app.example.com clear:true`",
+      inline: false
+    },
+    {
       name: "ℹ️ About",
       value: "This bot monitors DNS changes and sends notifications when IP addresses or DNS records change.",
       inline: false
@@ -1512,6 +1781,8 @@ async function handleDiscordInteraction(interaction: DiscordInteraction, env: En
         return await handleListDomains(interaction, env);
       case "status":
         return await handleDomainStatus(interaction, env);
+      case "dampening":
+        return await handleDampening(interaction, env);
       default:
         return {
           type: 4,
