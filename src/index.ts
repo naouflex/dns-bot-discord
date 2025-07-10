@@ -729,48 +729,76 @@ async function discoverSubdomainsFromCT(domain: string): Promise<string[]> {
   try {
     console.log(`🔍 Querying Certificate Transparency logs for ${domain}...`);
     
-    // Query crt.sh API for certificates
-    const response = await fetch(`https://crt.sh/?q=${encodeURIComponent(domain)}&output=json`, {
-      headers: {
-        'User-Agent': 'DNS-Monitor-Bot/1.0'
+    // Add timeout to CT API call (2 seconds max)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    
+    try {
+      // Query crt.sh API for certificates
+      const response = await fetch(`https://crt.sh/?q=${encodeURIComponent(domain)}&output=json`, {
+        headers: {
+          'User-Agent': 'DNS-Monitor-Bot/1.0'
+        },
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        console.error(`CT API error: ${response.status} ${response.statusText}`);
+        return [];
       }
-    });
 
-    if (!response.ok) {
-      console.error(`CT API error: ${response.status} ${response.statusText}`);
-      return [];
-    }
+      const certificates: CTLogEntry[] = await response.json();
+      console.log(`📜 Found ${certificates.length} certificates in CT logs`);
 
-    const certificates: CTLogEntry[] = await response.json();
-    console.log(`📜 Found ${certificates.length} certificates in CT logs`);
+      const subdomains = new Set<string>();
 
-    const subdomains = new Set<string>();
+      // Limit processing to prevent timeouts
+      const maxCertsToProcess = 500; // Reasonable limit
+      const certsToProcess = certificates.slice(0, maxCertsToProcess);
 
-    for (const cert of certificates) {
-      // Extract domains from both common_name and name_value (SAN)
-      const domains = cert.name_value.split('\n').concat([cert.common_name]);
-      
-      for (let certDomain of domains) {
-        certDomain = certDomain.trim().toLowerCase();
+      for (const cert of certsToProcess) {
+        // Extract domains from both common_name and name_value (SAN)
+        const domains = cert.name_value.split('\n').concat([cert.common_name]);
         
-        // Skip wildcards and invalid entries
-        if (certDomain.startsWith('*') || !certDomain.includes('.')) {
-          continue;
-        }
-        
-        // Check if it's a subdomain of our target domain
-        if (certDomain.endsWith(`.${domain}`) || certDomain === domain) {
-          // Validate domain format
-          if (isValidDomain(certDomain)) {
-            subdomains.add(certDomain);
+        for (let certDomain of domains) {
+          certDomain = certDomain.trim().toLowerCase();
+          
+          // Skip wildcards and invalid entries
+          if (certDomain.startsWith('*') || !certDomain.includes('.')) {
+            continue;
+          }
+          
+          // Check if it's a subdomain of our target domain
+          if (certDomain.endsWith(`.${domain}`) || certDomain === domain) {
+            // Validate domain format
+            if (isValidDomain(certDomain)) {
+              subdomains.add(certDomain);
+            }
           }
         }
+        
+        // Stop if we've found too many to prevent timeouts
+        if (subdomains.size > 100) {
+          console.log(`⚠️ Found ${subdomains.size} domains, truncating to prevent timeout`);
+          break;
+        }
       }
-    }
 
-    const result = Array.from(subdomains).sort();
-    console.log(`✅ Discovered ${result.length} unique domains from CT logs`);
-    return result;
+      const result = Array.from(subdomains).sort();
+      console.log(`✅ Discovered ${result.length} unique domains from CT logs`);
+      return result;
+
+    } catch (fetchError: unknown) {
+      clearTimeout(timeoutId);
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        console.log(`⏰ CT API timeout for ${domain}, falling back to common subdomains`);
+      } else {
+        console.error('CT API fetch error:', fetchError);
+      }
+      return [];
+    }
 
   } catch (error) {
     console.error('Error querying Certificate Transparency logs:', error);
@@ -833,6 +861,10 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
   const currentDomains = await getDynamicDomains(env);
   
   try {
+    // Set a timeout for the entire discovery process (2 seconds max)
+    const discoveryStartTime = Date.now();
+    const maxDiscoveryTime = 2000; // 2 seconds
+    
     // First try Certificate Transparency discovery
     console.log(`🔍 Starting subdomain discovery for ${domain}`);
     let discoveredDomains = await discoverSubdomainsFromCT(domain);
@@ -845,11 +877,22 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
       discoveredDomains.push(domain); // Include root domain
       usedCTDiscovery = false;
     }
+    
+    // Limit total domains to check to ensure fast response
+    if (discoveredDomains.length > 30) {
+      console.log(`⚠️ Too many domains (${discoveredDomains.length}), limiting to 30 for fast response`);
+      discoveredDomains = discoveredDomains.slice(0, 30);
+    }
 
     console.log(`📋 Found ${discoveredDomains.length} potential domains to check`);
 
     // Check each discovered domain
     for (const checkDomain of discoveredDomains) {
+      // Check if we're running out of time
+      if (Date.now() - discoveryStartTime > maxDiscoveryTime) {
+        console.log(`⏰ Discovery timeout reached, processed ${result.added.length + result.existing.length} domains`);
+        break;
+      }
       try {
         // Skip if already being monitored
         if (currentDomains.includes(checkDomain)) {
@@ -882,8 +925,14 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
           result.skipped.push(checkDomain);
         }
         
-        // Small delay to avoid overwhelming DNS servers
-        await new Promise(resolve => setTimeout(resolve, 50));
+        // Small delay to avoid overwhelming DNS servers (reduced for speed)
+        await new Promise(resolve => setTimeout(resolve, 10));
+        
+        // Break early if processing too many domains to stay within Discord timeout
+        if (result.added.length + result.existing.length > 50) {
+          console.log(`⚠️ Processed ${result.added.length + result.existing.length} domains, stopping to prevent timeout`);
+          break;
+        }
         
       } catch (error) {
         result.errors.push(checkDomain);
@@ -1261,8 +1310,20 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
     
     const rootAlreadyExists = allCurrentDomains.includes(domain);
 
-    // Discover subdomains
-    const discovery = await discoverSubdomains(domain, env, verifyAll);
+    // Discover subdomains with timeout handling
+    let discovery;
+    try {
+      discovery = await discoverSubdomains(domain, env, verifyAll);
+    } catch (discoveryError) {
+      console.error('Subdomain discovery failed:', discoveryError);
+      // Fallback: just add the root domain
+      discovery = {
+        existing: rootAlreadyExists ? [domain] : [],
+        added: rootAlreadyExists ? [] : [domain],
+        skipped: [],
+        errors: [`Discovery failed: ${discoveryError instanceof Error ? discoveryError.message : String(discoveryError)}`]
+      };
+    }
     
     // Add root domain if not already monitored
     if (!rootAlreadyExists) {
@@ -1291,39 +1352,51 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
     const fields = [];
     
     if (discovery.added.length > 0) {
+      const addedText = discovery.added.length > 10 
+        ? `${discovery.added.slice(0, 5).map(d => `\`${d}\``).join(", ")} and ${discovery.added.length - 5} more...`
+        : discovery.added.map(d => `\`${d}\``).join(", ");
+      
       fields.push({
         name: `✅ Added (${discovery.added.length})`,
-        value: discovery.added.map(d => `\`${d}\``).join(", "),
+        value: addedText,
         inline: false
       });
     }
     
     if (discovery.existing.length > 0) {
+      const existingText = discovery.existing.length > 10 
+        ? `${discovery.existing.slice(0, 5).map(d => `\`${d}\``).join(", ")} and ${discovery.existing.length - 5} more...`
+        : discovery.existing.map(d => `\`${d}\``).join(", ");
+      
       fields.push({
         name: `📋 Already Monitored (${discovery.existing.length})`,
-        value: discovery.existing.map(d => `\`${d}\``).join(", "),
+        value: existingText,
         inline: false
       });
     }
     
-    if (discovery.skipped.length > 0 && discovery.skipped.length <= 10) {
+    if (discovery.skipped.length > 0 && discovery.skipped.length <= 5) {
       fields.push({
         name: `⏭️ Not Found (${discovery.skipped.length})`,
-        value: discovery.skipped.slice(0, 10).map(d => `\`${d}\``).join(", "),
+        value: discovery.skipped.slice(0, 5).map(d => `\`${d}\``).join(", "),
         inline: false
       });
-    } else if (discovery.skipped.length > 10) {
+    } else if (discovery.skipped.length > 5) {
       fields.push({
         name: `⏭️ Not Found (${discovery.skipped.length})`,
-        value: `${discovery.skipped.slice(0, 5).map(d => `\`${d}\``).join(", ")} and ${discovery.skipped.length - 5} more...`,
+        value: `${discovery.skipped.slice(0, 3).map(d => `\`${d}\``).join(", ")} and ${discovery.skipped.length - 3} more...`,
         inline: false
       });
     }
     
     if (discovery.errors.length > 0) {
+      const errorText = discovery.errors.length > 3 
+        ? `${discovery.errors.slice(0, 2).join(", ")} and ${discovery.errors.length - 2} more...`
+        : discovery.errors.join(", ");
+      
       fields.push({
         name: `❌ Errors (${discovery.errors.length})`,
-        value: discovery.errors.map(d => `\`${d}\``).join(", "),
+        value: errorText,
         inline: false
       });
     }
