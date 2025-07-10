@@ -205,6 +205,7 @@ Adds a single domain to DNS monitoring.
 - Prevents duplicate entries
 - Updates bot status automatically
 - Shows who added the domain
+- **Note:** Initial DNS state is recorded silently (no false "change detected" alerts)
 
 #### `/add-with-subdomains <domain>` **NEW!**
 Discovers and adds real subdomains using Certificate Transparency logs.
@@ -216,6 +217,7 @@ Discovers and adds real subdomains using Certificate Transparency logs.
 - Option `verify-all`: Verifies all discovered domains are active (slower but more accurate)
 - Falls back to common subdomains if CT discovery fails
 - Discovers legitimate subdomains that actually exist with SSL certificates
+- **Note:** Initial DNS state is recorded silently for all new domains (no false alerts)
 
 #### `/remove <domain>`
 Removes a domain from DNS monitoring.

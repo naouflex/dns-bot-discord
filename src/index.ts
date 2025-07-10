@@ -335,105 +335,130 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
     previousIPsArray.sort();
     currentIPs.sort();
 
+    // Check if this is the first time monitoring this domain
+    const isFirstTimeMonitoring = !previousState && !previousIPs && !previousSerial;
+    
     // If the IPs have changed
     if (JSON.stringify(previousIPsArray) !== JSON.stringify(currentIPs)) {
       await env.DNS_KV.put(`dns:${domain}:state`, "resolved");
       await env.DNS_KV.put(`dns:${domain}:ips`, currentIPs.join(","));
       await env.DNS_KV.put(`dns:${domain}:serial`, serial);
 
-      const embed = createEmbed('change', 'DNS Change Detected');
-      embed.description = `IP addresses for \`${domain}\` have changed`;
-      embed.fields = [
-        {
-          name: "Previous IPs",
-          value: previousIPs || "none",
-          inline: false
-        },
-        {
-          name: "New IPs",
-          value: currentIPs.join(", "),
-          inline: false
-        },
-        {
-          name: "TTL",
-          value: `${aRecords[0]?.TTL || "N/A"}`,
-          inline: true
-        },
-        {
-          name: "DNS Status",
-          value: `${dnsData.Status}`,
-          inline: true
-        },
-        {
-          name: "Record Type",
-          value: "A",
-          inline: true
-        },
-        {
-          name: "SOA Serial",
-          value: serial,
-          inline: true
-        },
-        {
-          name: "Primary NS",
-          value: soaData[0] || "unknown",
-          inline: true
-        },
-        {
-          name: "Admin Email",
-          value: soaData[1] || "unknown",
-          inline: true
-        }
-      ];
+      if (isFirstTimeMonitoring) {
+        // First time monitoring - store initial state without notification
+        console.log(`🔍 First time monitoring ${domain}:`);
+        console.log(`Initial IPs: ${currentIPs.join(", ")}`);
+        console.log(`SOA Serial: ${serial}`);
+        console.log(`Timestamp: ${new Date().toISOString()}`);
+      } else {
+        // Actual change detected - send notification
+        const embed = createEmbed('change', 'DNS Change Detected');
+        embed.description = `IP addresses for \`${domain}\` have changed`;
+        embed.fields = [
+          {
+            name: "Previous IPs",
+            value: previousIPs || "none",
+            inline: false
+          },
+          {
+            name: "New IPs",
+            value: currentIPs.join(", "),
+            inline: false
+          },
+          {
+            name: "TTL",
+            value: `${aRecords[0]?.TTL || "N/A"}`,
+            inline: true
+          },
+          {
+            name: "DNS Status",
+            value: `${dnsData.Status}`,
+            inline: true
+          },
+          {
+            name: "Record Type",
+            value: "A",
+            inline: true
+          },
+          {
+            name: "SOA Serial",
+            value: serial,
+            inline: true
+          },
+          {
+            name: "Primary NS",
+            value: soaData[0] || "unknown",
+            inline: true
+          },
+          {
+            name: "Admin Email",
+            value: soaData[1] || "unknown",
+            inline: true
+          }
+        ];
 
-      // Only add role mention if DISCORD_ROLE_ID is set
-      const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
-      await sendDiscordMessage(env, embed, mentionContent);
-      
-      console.log(`DNS change detected for ${domain}:`);
-      console.log(`Previous IPs: ${previousIPs || "none"}`);
-      console.log(`New IPs: ${currentIPs.join(", ")}`);
-      console.log(`SOA Serial: ${serial}`);
-      console.log(`Timestamp: ${new Date().toISOString()}`);
+        // Only add role mention if DISCORD_ROLE_ID is set
+        const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
+        await sendDiscordMessage(env, embed, mentionContent);
+        
+        console.log(`DNS change detected for ${domain}:`);
+        console.log(`Previous IPs: ${previousIPs || "none"}`);
+        console.log(`New IPs: ${currentIPs.join(", ")}`);
+        console.log(`SOA Serial: ${serial}`);
+        console.log(`Timestamp: ${new Date().toISOString()}`);
+      }
     } else if (serial !== previousSerial) {
       // Only notify on SOA changes if IPs haven't changed
       // This catches cases where other record types changed
       await env.DNS_KV.put(`dns:${domain}:serial`, serial);
 
-      const embed = createEmbed('update', 'DNS Zone Updated');
-      embed.description = `SOA record for \`${domain}\` has been updated`;
-      embed.fields = [
-        {
-          name: "Previous Serial",
-          value: previousSerial || "unknown",
-          inline: true
-        },
-        {
-          name: "New Serial",
-          value: serial,
-          inline: true
-        },
-        {
-          name: "Primary NS",
-          value: soaData[0] || "unknown",
-          inline: true
-        },
-        {
-          name: "Admin Email",
-          value: soaData[1] || "unknown",
-          inline: true
-        },
-        {
-          name: "Refresh/Retry/Expire/Min TTL",
-          value: `${soaData[3] || "?"} / ${soaData[4] || "?"} / ${soaData[5] || "?"} / ${soaData[6] || "?"}`,
-          inline: false
-        }
-      ];
+      if (!isFirstTimeMonitoring) {
+        // Only send SOA notifications for domains that were already being monitored
+        const embed = createEmbed('update', 'DNS Zone Updated');
+        embed.description = `SOA record for \`${domain}\` has been updated`;
+        embed.fields = [
+          {
+            name: "Previous Serial",
+            value: previousSerial || "unknown",
+            inline: true
+          },
+          {
+            name: "New Serial",
+            value: serial,
+            inline: true
+          },
+          {
+            name: "Primary NS",
+            value: soaData[0] || "unknown",
+            inline: true
+          },
+          {
+            name: "Admin Email",
+            value: soaData[1] || "unknown",
+            inline: true
+          },
+          {
+            name: "Refresh/Retry/Expire/Min TTL",
+            value: `${soaData[3] || "?"} / ${soaData[4] || "?"} / ${soaData[5] || "?"} / ${soaData[6] || "?"}`,
+            inline: false
+          }
+        ];
 
-      await sendDiscordMessage(env, embed);
-      console.log(`SOA record updated for ${domain}:`);
+        await sendDiscordMessage(env, embed);
+      }
+      
+      console.log(`SOA record ${isFirstTimeMonitoring ? 'initialized' : 'updated'} for ${domain}:`);
       console.log(`Previous Serial: ${previousSerial || "unknown"}`);
       console.log(`New Serial: ${serial}`);
+    } else if (isFirstTimeMonitoring) {
+      // First time monitoring and no changes detected - just store initial state
+      await env.DNS_KV.put(`dns:${domain}:state`, "resolved");
+      await env.DNS_KV.put(`dns:${domain}:ips`, currentIPs.join(","));
+      await env.DNS_KV.put(`dns:${domain}:serial`, serial);
+      
+      console.log(`🔍 First time monitoring ${domain} - storing initial state:`);
+      console.log(`IPs: ${currentIPs.join(", ")}`);
+      console.log(`SOA Serial: ${serial}`);
     } else {
       console.log(
         `No change detected for ${domain} (IPs: ${currentIPs.join(", ")})`
@@ -937,6 +962,11 @@ async function handleAddDomain(interaction: DiscordInteraction, env: Env): Promi
          name: "Added By",
          value: interaction.member?.user?.username || interaction.user?.username || "Unknown",
          inline: true
+       },
+       {
+         name: "ℹ️ Note",
+         value: "Initial DNS state will be recorded on next check without triggering alerts",
+         inline: false
        }
      ];
 
@@ -1303,6 +1333,14 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
       value: `**Total Domains:** ${totalDomains}\n**Added by:** ${interaction.member?.user?.username || interaction.user?.username || "Unknown"}\n**Verification:** ${verifyAll ? "All domains verified" : "Standard discovery"}`,
       inline: false
     });
+    
+    if (discovery.added.length > 0) {
+      fields.push({
+        name: "ℹ️ Note",
+        value: "Initial DNS state will be recorded for new domains without triggering alerts",
+        inline: false
+      });
+    }
     
     embed.fields = fields;
 
