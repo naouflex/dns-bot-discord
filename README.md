@@ -290,6 +290,12 @@ The bot displays live status information:
 # Check specific domain status
 /status curve.finance
 
+# Check if domain has dampening enabled (prevents notification spam)
+/dampening app.example.com
+
+# Clear dampening to allow immediate notifications again
+/dampening app.example.com clear:true
+
 # Remove domains from monitoring
 /remove oldsite.com
 ```
@@ -368,6 +374,13 @@ Returns:
   3. Verify domains are accessible and have valid DNS records
 
 - **Missing domain data:** Check the `/status` endpoint to see current domain configuration
+
+- **DNS change notification spam:**
+  1. Some domains (CDNs, load balancers) frequently rotate IP addresses
+  2. The bot automatically applies dampening based on TTL values
+  3. Use `/dampening <domain>` to check current dampening status
+  4. Use `/dampening <domain> clear:true` to reset and allow immediate notifications
+  5. Domains with oscillating IPs get longer dampening periods automatically
 
 ## Footnotes
 
