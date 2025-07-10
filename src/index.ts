@@ -1734,18 +1734,46 @@ async function handleRemoveWithSubdomains(interaction: DiscordInteraction, env: 
     };
   }
 
-  // Send deferred response (shows "Bot is thinking...")
-  const deferredResponse = {
+  // Defer the response since this might take time with many subdomains
+  const deferResponse = {
     type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
     data: {}
   };
 
-  // Start the async removal process (fire and forget)
-  performRemoveWithSubdomainsAsync(interaction, env, domain).catch(error => {
-    console.error("Async removal failed:", error);
-  });
-
-  return deferredResponse;
+  try {
+    // Do the actual work and send followup BEFORE returning
+    await performRemoveWithSubdomainsAsync(interaction, env, domain);
+    return deferResponse;
+    
+  } catch (error) {
+    console.error("Error removing domains:", error);
+    
+    // Try to send error as followup
+    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
+    
+    try {
+      await fetch(followupUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          content: `❌ Failed to remove domains: ${error instanceof Error ? error.message : String(error)}`
+        })
+      });
+      
+      return deferResponse;
+    } catch (followupError) {
+      console.error("Failed to send followup error:", followupError);
+      return {
+        type: 4,
+        data: {
+          content: `❌ Failed to remove domains: ${error instanceof Error ? error.message : String(error)}`,
+          flags: 64
+        }
+      };
+    }
+  }
 }
 
 async function performListDomainsAsync(interaction: DiscordInteraction, env: Env): Promise<void> {
