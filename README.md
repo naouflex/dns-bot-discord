@@ -238,6 +238,15 @@ Removes a domain from DNS monitoring.
 - Updates bot status automatically
 - Shows who removed the domain
 
+#### `/remove-with-subdomains <domain>` **NEW!**
+Removes a domain and ALL its subdomains from DNS monitoring.
+- **Example:** `/remove-with-subdomains example.com`
+- **Removes everything matching:** `example.com`, `*.example.com` 
+- **Bulk cleanup:** Perfect for removing domains added with `/add-with-subdomains` or `/discover`
+- **Smart filtering:** Only removes dynamic domains (static domains are protected)
+- **Comprehensive cleanup:** Removes all stored DNS data for all matching domains
+- **Detailed report:** Shows exactly what was removed and what couldn't be removed
+
 #### `/status <domain>`
 Check current DNS status of a specific domain.
 - **Example:** `/status example.com`
@@ -313,6 +322,9 @@ The bot displays live status information:
 
 # Remove domains from monitoring
 /remove oldsite.com
+
+# Remove domain and ALL its subdomains at once
+/remove-with-subdomains github.com
 ```
 
 ## Worker Endpoints

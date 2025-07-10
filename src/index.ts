@@ -113,8 +113,8 @@ const DISCORD_COMMANDS = [
     ]
   },
   {
-    name: "add-with-subdomains",
-    description: "Add a domain and discover real subdomains using Certificate Transparency logs (quick)",
+    name: "add-with-subdomains", 
+    description: "Add a domain and discover real subdomains using Certificate Transparency logs (may take 5-10s)",
     options: [
       {
         name: "domain",
@@ -149,6 +149,18 @@ const DISCORD_COMMANDS = [
       {
         name: "domain",
         description: "Domain name to stop monitoring",
+        type: 3, // STRING
+        required: true
+      }
+    ]
+  },
+  {
+    name: "remove-with-subdomains",
+    description: "Remove a domain and all its subdomains from DNS monitoring",
+    options: [
+      {
+        name: "domain",
+        description: "Domain name to remove along with all its subdomains",
         type: 3, // STRING
         required: true
       }
@@ -1372,6 +1384,154 @@ async function handleRemoveDomain(interaction: DiscordInteraction, env: Env): Pr
   }
 }
 
+async function handleRemoveWithSubdomains(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+  const domain = interaction.data?.options?.[0]?.value?.toLowerCase();
+  
+  if (!domain) {
+    return {
+      type: 4,
+      data: {
+        content: "❌ Please provide a domain name.",
+        flags: 64
+      }
+    };
+  }
+
+  if (!isValidDomain(domain)) {
+    return {
+      type: 4,
+      data: {
+        content: `❌ Invalid domain format: \`${domain}\``,
+        flags: 64
+      }
+    };
+  }
+
+  try {
+    const domains = await getDynamicDomains(env);
+    const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+    
+    // Find all domains that match the target domain or are subdomains of it
+    const toRemove: string[] = [];
+    const staticMatches: string[] = [];
+    
+    // Check dynamic domains
+    for (const d of domains) {
+      if (d === domain || d.endsWith(`.${domain}`)) {
+        toRemove.push(d);
+      }
+    }
+    
+    // Check if any static domains would match (can't remove these)
+    for (const d of staticDomains) {
+      if (d === domain || d.endsWith(`.${domain}`)) {
+        staticMatches.push(d);
+      }
+    }
+    
+    if (toRemove.length === 0 && staticMatches.length === 0) {
+      return {
+        type: 4,
+        data: {
+          content: `❌ No domains found matching \`${domain}\` or its subdomains.`,
+          flags: 64
+        }
+      };
+    }
+    
+    if (toRemove.length === 0 && staticMatches.length > 0) {
+      return {
+        type: 4,
+        data: {
+          content: `❌ Found ${staticMatches.length} matching static domain(s) but they cannot be removed via Discord commands. Static domains: ${staticMatches.map(d => `\`${d}\``).join(', ')}`,
+          flags: 64
+        }
+      };
+    }
+    
+    // Remove the matching domains
+    const filteredDomains = domains.filter(d => !toRemove.includes(d));
+    
+    // Save updated list
+    await saveDynamicDomains(env, filteredDomains);
+
+    // Clean up stored DNS data for all removed domains
+    const keysToDelete: string[] = [];
+    for (const removedDomain of toRemove) {
+      keysToDelete.push(
+        `dns:${removedDomain}:ips`,
+        `dns:${removedDomain}:serial`, 
+        `dns:${removedDomain}:state`,
+        `notify:${removedDomain}:last`,
+        `notify:${removedDomain}:recent_ips`
+      );
+    }
+    
+    for (const key of keysToDelete) {
+      try {
+        await env.DNS_KV.delete(key);
+      } catch (error) {
+        console.error(`Failed to delete key ${key}:`, error);
+      }
+    }
+
+    // Update bot status
+    const totalDomains = staticDomains.length + filteredDomains.length;
+    await updateBotStatus(env, totalDomains, new Date().toISOString());
+
+    const embed = createEmbed('update', 'Domain and Subdomains Removed');
+    embed.description = `Successfully removed \`${domain}\` and all its subdomains from DNS monitoring`;
+    
+    const fields = [];
+    
+    // Show removed domains
+    if (toRemove.length > 0) {
+      const removedText = toRemove.length > 15 
+        ? `${toRemove.slice(0, 10).map(d => `\`${d}\``).join(", ")} and ${toRemove.length - 10} more...`
+        : toRemove.map(d => `\`${d}\``).join(", ");
+      
+      fields.push({
+        name: `🗑️ Removed (${toRemove.length})`,
+        value: removedText,
+        inline: false
+      });
+    }
+    
+    // Show static domains that couldn't be removed
+    if (staticMatches.length > 0) {
+      fields.push({
+        name: `⚠️ Static Domains (${staticMatches.length}) - Not Removed`,
+        value: staticMatches.map(d => `\`${d}\``).join(", "),
+        inline: false
+      });
+    }
+    
+    fields.push({
+      name: "📊 Summary",
+      value: `**Removed:** ${toRemove.length} domains\n**Total Domains:** ${totalDomains} (was ${totalDomains + toRemove.length})\n**Removed By:** ${interaction.member?.user?.username || interaction.user?.username || "Unknown"}`,
+      inline: false
+    });
+
+    embed.fields = fields;
+
+    return {
+      type: 4,
+      data: {
+        embeds: [embed]
+      }
+    };
+  } catch (error) {
+    console.error("Error removing domains:", error);
+    return {
+      type: 4,
+      data: {
+        content: `❌ Failed to remove domains: ${error instanceof Error ? error.message : String(error)}`,
+        flags: 64
+      }
+    };
+  }
+}
+
 async function handleListDomains(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
   try {
     const dynamicDomains = await getDynamicDomains(env);
@@ -2079,7 +2239,7 @@ async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<Di
     },
     {
       name: "🔍 `/add-with-subdomains <domain>`",
-      value: "Quick subdomain discovery using Certificate Transparency logs\nExample: `/add-with-subdomains example.com`\nOption: `verify-all` to verify all discovered domains are active",
+      value: "Fast subdomain discovery using Certificate Transparency logs\nExample: `/add-with-subdomains example.com`\nOption: `verify-all` to verify all discovered domains are active\n⏱️ Takes 5-10 seconds (deferred response)",
       inline: false
     },
     {
@@ -2090,6 +2250,11 @@ async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<Di
     {
       name: "➖ `/remove <domain>`",
       value: "Remove a domain from monitoring\nExample: `/remove example.com`",
+      inline: false
+    },
+    {
+      name: "🗑️ `/remove-with-subdomains <domain>`",
+      value: "Remove a domain and ALL its subdomains from monitoring\nExample: `/remove-with-subdomains example.com`\nRemoves example.com, www.example.com, api.example.com, etc.",
       inline: false
     },
     {
@@ -2138,6 +2303,8 @@ async function handleDiscordInteraction(interaction: DiscordInteraction, env: En
       return await handleDiscoverThorough(interaction, env);
       case "remove":
         return await handleRemoveDomain(interaction, env);
+      case "remove-with-subdomains":
+        return await handleRemoveWithSubdomains(interaction, env);
       case "list":
         return await handleListDomains(interaction, env);
       case "status":
