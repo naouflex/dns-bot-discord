@@ -114,7 +114,7 @@ const DISCORD_COMMANDS = [
   },
   {
     name: "add-with-subdomains", 
-    description: "Add domain + subdomains via Certificate Transparency logs (shows thinking, then results)",
+    description: "Add domain + subdomains via Certificate Transparency logs ",
     options: [
       {
         name: "domain",
@@ -156,7 +156,7 @@ const DISCORD_COMMANDS = [
   },
   {
     name: "remove-with-subdomains",
-    description: "Remove domain + all subdomains from monitoring (shows thinking, then results)",
+    description: "Remove domain + all subdomains from monitoring ",
     options: [
       {
         name: "domain",
@@ -168,7 +168,7 @@ const DISCORD_COMMANDS = [
   },
   {
     name: "list",
-    description: "List all monitored domains (shows thinking, then complete list)"
+    description: "List all monitored domains"
   },
   {
     name: "status",
@@ -535,7 +535,7 @@ async function sendAutoSuppressionNotification(env: Env, domain: string, previou
   ];
 
   // Only add role mention if DISCORD_ROLE_ID is set
-  const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
+  const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : ``;
   await sendDiscordMessage(env, embed, mentionContent);
 }
 
@@ -682,7 +682,7 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
             ];
 
             // Only add role mention if DISCORD_ROLE_ID is set
-            const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
+            const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : ``;
             await sendDiscordMessage(env, embed, mentionContent);
           }
           
@@ -1711,7 +1711,7 @@ async function performRemoveWithSubdomainsAsync(interaction: DiscordInteraction,
   }
 }
 
-async function handleRemoveWithSubdomains(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+async function handleRemoveWithSubdomains(interaction: DiscordInteraction, env: Env, ctx?: ExecutionContext): Promise<DiscordInteractionResponse> {
   const domain = interaction.data?.options?.[0]?.value?.toLowerCase();
   
   if (!domain) {
@@ -1734,150 +1734,156 @@ async function handleRemoveWithSubdomains(interaction: DiscordInteraction, env: 
     };
   }
 
-  // Defer the response since this might take time with many subdomains
-  const deferResponse = {
+  if (ctx) {
+    // Use proper execution context to ensure async work completes
+    ctx.waitUntil(performRemoveWithSubdomainsAsync(interaction, env, domain));
+  } else {
+    // Fallback: start async work immediately
+    performRemoveWithSubdomainsAsync(interaction, env, domain).catch(error => {
+      console.error("Background remove with subdomains failed:", error);
+    });
+  }
+
+  // Return deferred response IMMEDIATELY
+  return {
     type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
     data: {}
   };
-
-  try {
-    // Do the actual work and send followup BEFORE returning
-    await performRemoveWithSubdomainsAsync(interaction, env, domain);
-    return deferResponse;
-    
-  } catch (error) {
-    console.error("Error removing domains:", error);
-    
-    // Try to send error as followup
-    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
-    
-    try {
-      await fetch(followupUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          content: `❌ Failed to remove domains: ${error instanceof Error ? error.message : String(error)}`
-        })
-      });
-      
-      return deferResponse;
-    } catch (followupError) {
-      console.error("Failed to send followup error:", followupError);
-      return {
-        type: 4,
-        data: {
-          content: `❌ Failed to remove domains: ${error instanceof Error ? error.message : String(error)}`,
-          flags: 64
-        }
-      };
-    }
-  }
 }
 
 async function performListDomainsAsync(interaction: DiscordInteraction, env: Env): Promise<void> {
   const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
   
+  console.log("🔍 Starting performListDomainsAsync...");
+  
   try {
+    console.log("📋 Getting dynamic domains...");
     const dynamicDomains = await getDynamicDomains(env);
-    const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+    console.log(`📋 Dynamic domains retrieved: ${dynamicDomains.length} domains`);
     
-    const embed = createEmbed('update', 'Monitored Domains');
+    console.log("📋 Processing static domains...");
+    const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+    console.log(`📋 Static domains processed: ${staticDomains.length} domains`);
+    
+    console.log("🎨 Creating embeds...");
+    const embeds = [];
     
     if (dynamicDomains.length === 0 && staticDomains.length === 0) {
+      console.log("📋 No domains to display");
+      const embed = createEmbed('update', 'Monitored Domains');
       embed.description = "No domains are currently being monitored.";
+      embeds.push(embed);
     } else {
-      embed.description = "Currently monitored domains:";
+      console.log("📋 Building domain list display with multiple embeds...");
       
-      const fields = [];
+      // Helper function to create domain list chunks that fit within Discord's 1024 char limit
+      function createDomainChunks(domains: string[], prefix: string): string[] {
+        const chunks: string[] = [];
+        let currentChunk = "";
+        
+        for (const domain of domains) {
+          const domainText = `\`${domain}\``;
+          const separator = currentChunk ? ", " : "";
+          const testChunk = currentChunk + separator + domainText;
+          
+          // Keep some buffer for the prefix and formatting (leave ~50 chars margin)
+          if (testChunk.length > 970) {
+            if (currentChunk) {
+              chunks.push(currentChunk);
+              currentChunk = domainText;
+            } else {
+              // Single domain too long (shouldn't happen but handle it)
+              chunks.push(domainText);
+            }
+          } else {
+            currentChunk = testChunk;
+          }
+        }
+        
+        if (currentChunk) {
+          chunks.push(currentChunk);
+        }
+        
+        return chunks;
+      }
       
+      // Process static domains
       if (staticDomains.length > 0) {
-        // For many static domains, truncate the display
-        const staticText = staticDomains.length > 50 
-          ? `${staticDomains.slice(0, 25).map(d => `\`${d}\``).join(", ")} and ${staticDomains.length - 25} more...`
-          : staticDomains.map(d => `\`${d}\``).join(", ");
-          
-        fields.push({
-          name: `📋 Static Domains (${staticDomains.length})`,
-          value: staticText,
-          inline: false
+        console.log(`📋 Processing static domains into chunks (${staticDomains.length} domains)`);
+        const staticChunks = createDomainChunks(staticDomains, "📋 Static Domains");
+        
+        staticChunks.forEach((chunk, index) => {
+          const embed = createEmbed('update', index === 0 ? 'Monitored Domains - Static' : `Static Domains (continued ${index + 1})`);
+          embed.fields = [{
+            name: `📋 Static Domains${staticChunks.length > 1 ? ` (${index + 1}/${staticChunks.length})` : ''} (${staticDomains.length} total)`,
+            value: chunk,
+            inline: false
+          }];
+          embeds.push(embed);
         });
       }
       
+      // Process dynamic domains  
       if (dynamicDomains.length > 0) {
-        // For many dynamic domains, truncate the display
-        const dynamicText = dynamicDomains.length > 50 
-          ? `${dynamicDomains.slice(0, 25).map(d => `\`${d}\``).join(", ")} and ${dynamicDomains.length - 25} more...`
-          : dynamicDomains.map(d => `\`${d}\``).join(", ");
-          
-        fields.push({
-          name: `🔧 Dynamic Domains (${dynamicDomains.length})`,
-          value: dynamicText,
-          inline: false
+        console.log(`📋 Processing dynamic domains into chunks (${dynamicDomains.length} domains)`);
+        const dynamicChunks = createDomainChunks(dynamicDomains, "🔧 Dynamic Domains");
+        
+        dynamicChunks.forEach((chunk, index) => {
+          const embed = createEmbed('update', 
+            staticDomains.length === 0 && index === 0 ? 'Monitored Domains - Dynamic' : 
+            index === 0 ? 'Monitored Domains - Dynamic' : 
+            `Dynamic Domains (continued ${index + 1})`
+          );
+          embed.fields = [{
+            name: `🔧 Dynamic Domains${dynamicChunks.length > 1 ? ` (${index + 1}/${dynamicChunks.length})` : ''} (${dynamicDomains.length} total)`,
+            value: chunk,
+            inline: false
+          }];
+          embeds.push(embed);
         });
       }
       
-      fields.push({
-        name: "📊 Summary",
-        value: `**Total:** ${staticDomains.length + dynamicDomains.length} domains\n**Static:** ${staticDomains.length} (config-based)\n**Dynamic:** ${dynamicDomains.length} (bot-managed)`,
+      // Add summary embed
+      console.log("📋 Adding summary embed...");
+      const summaryEmbed = createEmbed('update', 'Domain Summary');
+      summaryEmbed.fields = [{
+        name: "📊 Total Overview",
+        value: `**Total Monitored:** ${staticDomains.length + dynamicDomains.length} domains\n**Static Domains:** ${staticDomains.length} (config-based)\n**Dynamic Domains:** ${dynamicDomains.length} (bot-managed)\n**Embeds Used:** ${embeds.length + 1}`,
         inline: false
-      });
-      
-      embed.fields = fields;
+      }];
+      embeds.push(summaryEmbed);
     }
 
-    // Send results as followup
-    await fetch(followupUrl, {
+    console.log(`📤 Sending ${embeds.length} embeds as followup message...`);
+    console.log(`📤 Followup URL: ${followupUrl}`);
+    
+    // Send results as followup - Discord supports up to 10 embeds per message
+    const response = await fetch(followupUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        embeds: [embed]
+        embeds: embeds
       })
     });
     
+    console.log(`📤 Followup response status: ${response.status}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`📤 Followup failed: ${response.status} - ${errorText}`);
+      throw new Error(`Discord API error: ${response.status} - ${errorText}`);
+    }
+    
+    console.log("✅ performListDomainsAsync completed successfully");
+    
   } catch (error) {
-    console.error("Error listing domains:", error);
+    console.error("❌ Error in performListDomainsAsync:", error);
     
     // Send error as followup
     try {
-      await fetch(followupUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          content: `❌ Failed to list domains: ${error instanceof Error ? error.message : String(error)}`
-        })
-      });
-    } catch (followupError) {
-      console.error("Failed to send followup error:", followupError);
-    }
-  }
-}
-
-async function handleListDomains(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
-  // Defer the response since this might take time with many domains
-  const deferResponse = {
-    type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
-    data: {}
-  };
-
-  try {
-    // Do the actual work and send followup BEFORE returning
-    await performListDomainsAsync(interaction, env);
-    return deferResponse;
-    
-  } catch (error) {
-    console.error("Error listing domains:", error);
-    
-    // Try to send error as followup
-    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
-    
-    try {
-      await fetch(followupUrl, {
+      console.log("📤 Sending error followup...");
+      const errorResponse = await fetch(followupUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -1887,18 +1893,35 @@ async function handleListDomains(interaction: DiscordInteraction, env: Env): Pro
         })
       });
       
-      return deferResponse;
+      console.log(`📤 Error followup response status: ${errorResponse.status}`);
+      if (!errorResponse.ok) {
+        const errorText = await errorResponse.text();
+        console.error(`📤 Error followup failed: ${errorResponse.status} - ${errorText}`);
+      } else {
+        console.log("✅ Error followup sent successfully");
+      }
     } catch (followupError) {
-      console.error("Failed to send followup error:", followupError);
-      return {
-        type: 4,
-        data: {
-          content: `❌ Failed to list domains: ${error instanceof Error ? error.message : String(error)}`,
-          flags: 64
-        }
-      };
+      console.error("❌ Failed to send followup error:", followupError);
     }
   }
+}
+
+async function handleListDomains(interaction: DiscordInteraction, env: Env, ctx?: ExecutionContext): Promise<DiscordInteractionResponse> {
+  if (ctx) {
+    // Use proper execution context to ensure async work completes
+    ctx.waitUntil(performListDomainsAsync(interaction, env));
+  } else {
+    // Fallback: start async work immediately  
+    performListDomainsAsync(interaction, env).catch(error => {
+      console.error("Background list domains failed:", error);
+    });
+  }
+  
+  // Return deferred response IMMEDIATELY
+  return {
+    type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    data: {}
+  };
 }
 
 async function handleDomainStatus(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
@@ -2166,7 +2189,7 @@ async function performSubdomainDiscoveryAsync(interaction: DiscordInteraction, e
   }
 }
 
-async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env, ctx?: ExecutionContext): Promise<DiscordInteractionResponse> {
   const domain = interaction.data?.options?.find(opt => opt.name === "domain")?.value?.toLowerCase();
   const verifyAllOption = interaction.data?.options?.find(opt => opt.name === "verify-all")?.value;
   const verifyAll = Boolean(verifyAllOption);
@@ -2191,47 +2214,21 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
     };
   }
 
-  // Defer the response since this might take longer than 3 seconds
-  const deferResponse = {
+  if (ctx) {
+    // Use proper execution context to ensure async work completes
+    ctx.waitUntil(performSubdomainDiscoveryAsync(interaction, env, domain, verifyAll));
+  } else {
+    // Fallback: start async work immediately
+    performSubdomainDiscoveryAsync(interaction, env, domain, verifyAll).catch(error => {
+      console.error("Background subdomain discovery failed:", error);
+    });
+  }
+
+  // Return deferred response IMMEDIATELY
+  return {
     type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
     data: {}
   };
-
-  try {
-    // Do the actual work and send followup BEFORE returning
-    await performSubdomainDiscoveryAsync(interaction, env, domain, verifyAll);
-    return deferResponse;
-    
-  } catch (error) {
-    console.error("Error in subdomain discovery:", error);
-    
-    // Try to send error as followup
-    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
-    
-    try {
-      await fetch(followupUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          content: `❌ Failed to discover subdomains: ${error instanceof Error ? error.message : String(error)}`
-        })
-      });
-      
-      return deferResponse;
-    } catch (followupError) {
-      // If we can't send followup, return error response directly
-      console.error("Failed to send followup error:", followupError);
-      return {
-        type: 4,
-        data: {
-          content: `❌ Failed to discover subdomains: ${error instanceof Error ? error.message : String(error)}`,
-          flags: 64
-        }
-      };
-    }
-  }
 }
 
 async function handleDampening(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
@@ -2378,7 +2375,7 @@ async function handleDampening(interaction: DiscordInteraction, env: Env): Promi
   }
 }
 
-async function handleDiscoverThorough(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+async function handleDiscoverThorough(interaction: DiscordInteraction, env: Env, ctx?: ExecutionContext): Promise<DiscordInteractionResponse> {
   const domain = interaction.data?.options?.find(opt => opt.name === "domain")?.value?.toLowerCase();
   
   if (!domain) {
@@ -2401,152 +2398,21 @@ async function handleDiscoverThorough(interaction: DiscordInteraction, env: Env)
     };
   }
 
-  // Defer the response since this will take longer than 3 seconds
-  const deferResponse = {
+  if (ctx) {
+    // Use proper execution context to ensure async work completes
+    ctx.waitUntil(performDiscoverThoroughAsync(interaction, env, domain));
+  } else {
+    // Fallback: start async work immediately
+    performDiscoverThoroughAsync(interaction, env, domain).catch(error => {
+      console.error("Background thorough discovery failed:", error);
+    });
+  }
+
+  // Return deferred response IMMEDIATELY
+  return {
     type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
     data: {}
   };
-
-  try {
-    // Check if root domain is already being monitored
-    const domains = await getDynamicDomains(env);
-    const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
-    const allCurrentDomains = [...staticDomains, ...domains];
-    
-    const rootAlreadyExists = allCurrentDomains.includes(domain);
-
-    // Thorough discovery with verification (verifyAll = true)
-    console.log(`🔍 Starting thorough subdomain discovery for ${domain}...`);
-    const discovery = await discoverSubdomains(domain, env, true);
-    
-    // Add root domain if not already monitored
-    if (!rootAlreadyExists) {
-      domains.push(domain);
-      if (!discovery.added.includes(domain)) {
-        discovery.added.unshift(domain);
-      }
-    }
-    
-    // Add discovered subdomains
-    for (const subdomain of discovery.added.filter(d => d !== domain)) {
-      if (!domains.includes(subdomain)) {
-        domains.push(subdomain);
-      }
-    }
-    
-    // Save to KV
-    if (discovery.added.length > 0) {
-      await env.DNS_KV.put("dynamic:domains", JSON.stringify(domains));
-    }
-
-    // Build response
-    const embed = createEmbed('update', 'Thorough Subdomain Discovery Complete');
-    embed.description = `Completed comprehensive discovery for \`${domain}\` using multiple methods and verification`;
-    
-    const fields = [];
-    
-    if (discovery.added.length > 0) {
-      const addedText = discovery.added.length > 15 
-        ? `${discovery.added.slice(0, 10).map(d => `\`${d}\``).join(", ")} and ${discovery.added.length - 10} more...`
-        : discovery.added.map(d => `\`${d}\``).join(", ");
-      
-      fields.push({
-        name: `✅ Added (${discovery.added.length})`,
-        value: addedText,
-        inline: false
-      });
-    }
-    
-    if (discovery.existing.length > 0) {
-      const existingText = discovery.existing.length > 10 
-        ? `${discovery.existing.slice(0, 5).map(d => `\`${d}\``).join(", ")} and ${discovery.existing.length - 5} more...`
-        : discovery.existing.map(d => `\`${d}\``).join(", ");
-      
-      fields.push({
-        name: `📋 Already Monitored (${discovery.existing.length})`,
-        value: existingText,
-        inline: false
-      });
-    }
-    
-    if (discovery.skipped.length > 0) {
-      fields.push({
-        name: `⏭️ Verified Inactive (${discovery.skipped.length})`,
-        value: discovery.skipped.length > 5 
-          ? `${discovery.skipped.slice(0, 3).map(d => `\`${d}\``).join(", ")} and ${discovery.skipped.length - 3} more...`
-          : discovery.skipped.slice(0, 5).map(d => `\`${d}\``).join(", "),
-        inline: false
-      });
-    }
-    
-    if (discovery.errors.length > 0) {
-      fields.push({
-        name: `❌ Errors (${discovery.errors.length})`,
-        value: `${discovery.errors.length} domains had verification errors`,
-        inline: false
-      });
-    }
-    
-    fields.push({
-      name: "📊 Discovery Summary",
-      value: `**Method:** Multi-source CT + DNS enumeration + wordlist\n**Verification:** All domains verified\n**Total Monitored:** ${domains.length}\n**By:** ${interaction.member?.user?.username || interaction.user?.username || "Unknown"}`,
-      inline: false
-    });
-    
-    if (discovery.added.length > 0) {
-      fields.push({
-        name: "ℹ️ Note",
-        value: "Initial DNS state will be recorded for new domains without triggering alerts",
-        inline: false
-      });
-    }
-    
-    embed.fields = fields;
-
-    // Send followup response to the deferred interaction
-    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
-    
-    await fetch(followupUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        embeds: [embed]
-      })
-    });
-
-    return deferResponse;
-    
-  } catch (error) {
-    console.error('Error in handleDiscoverThorough:', error);
-    
-    // Try to send error as followup
-    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
-    
-    try {
-      await fetch(followupUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          content: `❌ Error during thorough discovery: ${error instanceof Error ? error.message : String(error)}`
-        })
-      });
-      
-      return deferResponse;
-    } catch (followupError) {
-      // If we can't send followup, return error response directly
-      return {
-        type: 4,
-        data: {
-          content: `❌ Error during thorough discovery: ${error instanceof Error ? error.message : String(error)}`,
-          flags: 64
-        }
-      };
-    }
-  }
 }
 
 async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
@@ -2618,7 +2484,7 @@ async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<Di
   };
 }
 
-async function handleDiscordInteraction(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+async function handleDiscordInteraction(interaction: DiscordInteraction, env: Env, ctx?: ExecutionContext): Promise<DiscordInteractionResponse> {
   // Handle ping
   if (interaction.type === 1) {
     return { type: 1 };
@@ -2633,16 +2499,16 @@ async function handleDiscordInteraction(interaction: DiscordInteraction, env: En
         return await handleHelp(interaction, env);
       case "add":
         return await handleAddDomain(interaction, env);
-          case "add-with-subdomains":
-      return await handleAddWithSubdomains(interaction, env);
-    case "discover":
-      return await handleDiscoverThorough(interaction, env);
+      case "add-with-subdomains":
+        return await handleAddWithSubdomains(interaction, env, ctx);
+      case "discover":
+        return await handleDiscoverThorough(interaction, env, ctx);
       case "remove":
         return await handleRemoveDomain(interaction, env);
       case "remove-with-subdomains":
-        return await handleRemoveWithSubdomains(interaction, env);
+        return await handleRemoveWithSubdomains(interaction, env, ctx);
       case "list":
-        return await handleListDomains(interaction, env);
+        return await handleListDomains(interaction, env, ctx);
       case "status":
         return await handleDomainStatus(interaction, env);
       case "dampening":
@@ -2803,11 +2669,11 @@ export default {
         return new Response("Unauthorized", { status: 401 });
       }
       
-             try {
-         const interaction: DiscordInteraction = JSON.parse(requestBody);
-         console.log(`Handling interaction type: ${interaction.type}, command: ${interaction.data?.name || 'none'}`);
-         
-         const response = await handleDiscordInteraction(interaction, env);
+                   try {
+        const interaction: DiscordInteraction = JSON.parse(requestBody);
+        console.log(`Handling interaction type: ${interaction.type}, command: ${interaction.data?.name || 'none'}`);
+        
+        const response = await handleDiscordInteraction(interaction, env, ctx);
         
         return new Response(JSON.stringify(response), {
           headers: { "Content-Type": "application/json" },
@@ -2894,3 +2760,133 @@ export default {
      );
   },
 };
+
+async function performDiscoverThoroughAsync(interaction: DiscordInteraction, env: Env, domain: string): Promise<void> {
+  const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
+  
+  try {
+    // Check if root domain is already being monitored
+    const domains = await getDynamicDomains(env);
+    const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+    const allCurrentDomains = [...staticDomains, ...domains];
+    
+    const rootAlreadyExists = allCurrentDomains.includes(domain);
+
+    // Thorough discovery with verification (verifyAll = true)
+    console.log(`🔍 Starting thorough subdomain discovery for ${domain}...`);
+    const discovery = await discoverSubdomains(domain, env, true);
+    
+    // Add root domain if not already monitored
+    if (!rootAlreadyExists) {
+      domains.push(domain);
+      if (!discovery.added.includes(domain)) {
+        discovery.added.unshift(domain);
+      }
+    }
+    
+    // Add discovered subdomains
+    for (const subdomain of discovery.added.filter(d => d !== domain)) {
+      if (!domains.includes(subdomain)) {
+        domains.push(subdomain);
+      }
+    }
+    
+    // Save to KV
+    if (discovery.added.length > 0) {
+      await env.DNS_KV.put("dynamic:domains", JSON.stringify(domains));
+    }
+
+    // Build response
+    const embed = createEmbed('update', 'Thorough Subdomain Discovery Complete');
+    embed.description = `Completed comprehensive discovery for \`${domain}\` using multiple methods and verification`;
+    
+    const fields = [];
+    
+    if (discovery.added.length > 0) {
+      const addedText = discovery.added.length > 15 
+        ? `${discovery.added.slice(0, 10).map(d => `\`${d}\``).join(", ")} and ${discovery.added.length - 10} more...`
+        : discovery.added.map(d => `\`${d}\``).join(", ");
+      
+      fields.push({
+        name: `✅ Added (${discovery.added.length})`,
+        value: addedText,
+        inline: false
+      });
+    }
+    
+    if (discovery.existing.length > 0) {
+      const existingText = discovery.existing.length > 10 
+        ? `${discovery.existing.slice(0, 5).map(d => `\`${d}\``).join(", ")} and ${discovery.existing.length - 5} more...`
+        : discovery.existing.map(d => `\`${d}\``).join(", ");
+      
+      fields.push({
+        name: `📋 Already Monitored (${discovery.existing.length})`,
+        value: existingText,
+        inline: false
+      });
+    }
+    
+    if (discovery.skipped.length > 0) {
+      fields.push({
+        name: `⏭️ Verified Inactive (${discovery.skipped.length})`,
+        value: discovery.skipped.length > 5 
+          ? `${discovery.skipped.slice(0, 3).map(d => `\`${d}\``).join(", ")} and ${discovery.skipped.length - 3} more...`
+          : discovery.skipped.slice(0, 5).map(d => `\`${d}\``).join(", "),
+        inline: false
+      });
+    }
+    
+    if (discovery.errors.length > 0) {
+      fields.push({
+        name: `❌ Errors (${discovery.errors.length})`,
+        value: `${discovery.errors.length} domains had verification errors`,
+        inline: false
+      });
+    }
+    
+    fields.push({
+      name: "📊 Discovery Summary",
+      value: `**Method:** Multi-source CT + DNS enumeration + wordlist\n**Verification:** All domains verified\n**Total Monitored:** ${domains.length}\n**By:** ${interaction.member?.user?.username || interaction.user?.username || "Unknown"}`,
+      inline: false
+    });
+    
+    if (discovery.added.length > 0) {
+      fields.push({
+        name: "ℹ️ Note",
+        value: "Initial DNS state will be recorded for new domains without triggering alerts",
+        inline: false
+      });
+    }
+    
+    embed.fields = fields;
+
+    // Send followup response
+    await fetch(followupUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        embeds: [embed]
+      })
+    });
+    
+  } catch (error) {
+    console.error('Error in performDiscoverThoroughAsync:', error);
+    
+    // Send error as followup
+    try {
+      await fetch(followupUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          content: `❌ Error during thorough discovery: ${error instanceof Error ? error.message : String(error)}`
+        })
+      });
+    } catch (followupError) {
+      console.error("Failed to send followup error:", followupError);
+    }
+  }
+}
