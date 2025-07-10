@@ -316,8 +316,8 @@ graph TD
     style L fill:#ffff99
     style T fill:#ff6666
     style U fill:#99ff99
-    style O fill:#cccccc
-    style R fill:#cccccc
+    style O fill:#f0f0f0
+    style R fill:#f0f0f0
 ```
 
 ### Domain Management
