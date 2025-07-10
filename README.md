@@ -262,12 +262,17 @@ Check or clear DNS change notification dampening to prevent spam from load balan
 - Shows last notification time and recent IP changes
 - Detects oscillation between IP sets (common with CDNs/load balancers)
 - Prevents notification spam from domains with low TTL that frequently change IPs
-- **Auto-dampening periods:**
-  - TTL < 60s: 10 minutes between notifications
-  - TTL < 300s: 5 minutes between notifications
-  - TTL < 900s: 2x TTL or 2 minutes minimum
-  - TTL ≥ 900s: 1x TTL or 5 minutes minimum
-  - **Oscillation detected:** 2x normal period or 15 minutes minimum
+- **Enhanced auto-dampening system:**
+  - **CDN + Low TTL:** 1 hour between notifications (AWS, CloudFlare, Fastly IP ranges)
+  - **Load Balancer Pattern:** 45 minutes (frequent switching between 2-3 IP sets)
+  - **High Frequency Changes:** 30 minutes (low TTL with 3+ recent changes)
+  - **Basic TTL-based:**
+    - TTL < 60s: 20 minutes between notifications
+    - TTL < 300s: 15 minutes between notifications
+    - TTL < 900s: 2x TTL or 5 minutes minimum
+    - TTL ≥ 900s: 1x TTL or 5 minutes minimum
+  - **Oscillation detected:** 2-3x normal period or 30 minutes minimum
+  - **Auto-suppression:** 4 hours for domains with 5+ changes per hour
 
 ### Domain Management
 

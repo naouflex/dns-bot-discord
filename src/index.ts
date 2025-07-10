@@ -314,6 +314,63 @@ async function queryDNS(domain: string): Promise<DNSResponse> {
   };
 }
 
+// CDN and cloud provider IP ranges for enhanced dampening
+function isCDNOrCloudIP(ips: string[]): boolean {
+  const cdnRanges = [
+    // CloudFlare
+    { start: '13.32.0.0', end: '13.35.255.255' },
+    { start: '13.224.0.0', end: '13.227.255.255' },
+    { start: '13.249.0.0', end: '13.249.255.255' },
+    
+    // AWS CloudFront/ELB
+    { start: '3.160.0.0', end: '3.175.255.255' },
+    { start: '13.32.0.0', end: '13.35.255.255' },
+    { start: '52.84.0.0', end: '52.85.255.255' },
+    { start: '54.230.0.0', end: '54.239.255.255' },
+    
+    // Fastly
+    { start: '23.235.32.0', end: '23.235.63.255' },
+    { start: '151.101.0.0', end: '151.101.255.255' },
+    
+    // Generic load balancer patterns
+    { start: '172.64.0.0', end: '172.71.255.255' }, // CloudFlare
+    { start: '104.16.0.0', end: '104.31.255.255' }, // CloudFlare
+  ];
+  
+  for (const ip of ips) {
+    const ipNum = ipToNumber(ip);
+    for (const range of cdnRanges) {
+      if (ipNum >= ipToNumber(range.start) && ipNum <= ipToNumber(range.end)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function ipToNumber(ip: string): number {
+  return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+}
+
+function detectLoadBalancerPattern(domain: string, recentIPSets: Array<{ips: string[], timestamp: number}>): boolean {
+  // Detect if domain frequently switches between different IP sets (load balancer behavior)
+  if (recentIPSets.length < 3) return false;
+  
+  // Check for alternating patterns in the last hour
+  const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  const recentSets = recentIPSets.filter(set => set.timestamp > oneHourAgo);
+  
+  if (recentSets.length >= 3) {
+    const uniqueIPSets = new Set(recentSets.map(set => set.ips.sort().join(',')));
+    // If we have 3+ changes but only 2-3 unique IP sets, it's likely load balancer oscillation
+    if (recentSets.length >= 3 && uniqueIPSets.size <= 3) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 async function shouldSendDNSChangeNotification(env: Env, domain: string, currentIPs: string[], ttl: number): Promise<boolean> {
   try {
     const now = Date.now();
@@ -328,14 +385,32 @@ async function shouldSendDNSChangeNotification(env: Env, domain: string, current
     const recentIPsData = await env.DNS_KV.get(recentIPsKey);
     const recentIPSets: Array<{ips: string[], timestamp: number}> = recentIPsData ? JSON.parse(recentIPsData) : [];
     
-    // Calculate dampening period based on TTL
+    // Enhanced pattern detection
+    const isCDN = isCDNOrCloudIP(currentIPs);
+    const isLoadBalancer = detectLoadBalancerPattern(domain, recentIPSets);
+    const hasVeryLowTTL = ttl <= 60;
+    
+    // Calculate dampening period with enhanced logic
     let dampeningPeriod: number;
-    if (ttl < 60) {
-      dampeningPeriod = 10 * 60 * 1000; // 10 minutes for very short TTL
+    
+    if (isCDN && hasVeryLowTTL) {
+      // CDN with very low TTL: Very aggressive dampening
+      dampeningPeriod = 60 * 60 * 1000; // 1 hour
+      console.log(`🌐 CDN with low TTL detected: ${domain} - applying 1 hour dampening`);
+    } else if (isLoadBalancer) {
+      // Load balancer pattern: Aggressive dampening  
+      dampeningPeriod = 45 * 60 * 1000; // 45 minutes
+      console.log(`⚖️ Load balancer pattern detected: ${domain} - applying 45 min dampening`);
+    } else if (hasVeryLowTTL && recentIPSets.length > 2) {
+      // Low TTL with frequent changes: High dampening
+      dampeningPeriod = 30 * 60 * 1000; // 30 minutes
+      console.log(`⚡ High frequency changes detected: ${domain} - applying 30 min dampening`);
+    } else if (ttl < 60) {
+      dampeningPeriod = 20 * 60 * 1000; // 20 minutes for very short TTL (increased from 10)
     } else if (ttl < 300) {
-      dampeningPeriod = 5 * 60 * 1000; // 5 minutes for short TTL  
+      dampeningPeriod = 15 * 60 * 1000; // 15 minutes for short TTL (increased from 5)
     } else if (ttl < 900) {
-      dampeningPeriod = Math.max(ttl * 2 * 1000, 2 * 60 * 1000); // 2x TTL or 2 minutes minimum
+      dampeningPeriod = Math.max(ttl * 2 * 1000, 5 * 60 * 1000); // 2x TTL or 5 minutes minimum
     } else {
       dampeningPeriod = Math.max(ttl * 1000, 5 * 60 * 1000); // 1x TTL or 5 minutes minimum
     }
@@ -343,14 +418,15 @@ async function shouldSendDNSChangeNotification(env: Env, domain: string, current
     // Check if enough time has passed since last notification
     const timeSinceLastNotify = now - lastNotifyTime;
     if (timeSinceLastNotify < dampeningPeriod) {
-      console.log(`🔇 Dampening: Only ${Math.round(timeSinceLastNotify/1000)}s since last notify, need ${Math.round(dampeningPeriod/1000)}s`);
+      const remaining = Math.round((dampeningPeriod - timeSinceLastNotify) / (60 * 1000));
+      console.log(`🔇 Dampening active for ${domain}: ${remaining} minutes remaining`);
       
       // Still update recent IPs tracking without notifying
       await updateRecentIPTracking(env, domain, currentIPs, now);
       return false;
     }
     
-    // Check if this IP set was seen recently (oscillation detection)
+    // Enhanced oscillation detection
     const currentIPSet = currentIPs.sort().join(',');
     const recentIPSet = recentIPSets.find(set => 
       set.ips.sort().join(',') === currentIPSet && 
@@ -358,22 +434,45 @@ async function shouldSendDNSChangeNotification(env: Env, domain: string, current
     );
     
     if (recentIPSet && recentIPSets.length > 1) {
-      console.log(`🔄 Oscillation detected: IP set seen ${Math.round((now - recentIPSet.timestamp) / (60 * 1000))} minutes ago`);
+      const minutesAgo = Math.round((now - recentIPSet.timestamp) / (60 * 1000));
+      console.log(`🔄 Oscillation detected for ${domain}: IP set seen ${minutesAgo} minutes ago`);
       
-      // For oscillating IPs, use longer dampening period
-      const oscillationDampening = Math.max(dampeningPeriod * 2, 15 * 60 * 1000); // 2x normal or 15 minutes
+      // For oscillating IPs, use much longer dampening period
+      let oscillationDampening;
+      if (isCDN || isLoadBalancer) {
+        oscillationDampening = 2 * 60 * 60 * 1000; // 2 hours for CDN/LB oscillation
+      } else {
+        oscillationDampening = Math.max(dampeningPeriod * 3, 30 * 60 * 1000); // 3x normal or 30 minutes
+      }
+      
       if (timeSinceLastNotify < oscillationDampening) {
-        console.log(`🔇 Oscillation dampening: Need ${Math.round(oscillationDampening/1000)}s between notifications`);
+        const remainingOsc = Math.round((oscillationDampening - timeSinceLastNotify) / (60 * 1000));
+        console.log(`🔇 Oscillation dampening for ${domain}: ${remainingOsc} minutes remaining`);
         await updateRecentIPTracking(env, domain, currentIPs, now);
         return false;
       }
+    }
+    
+    // Auto-suppress very frequent changers
+    const recentChanges = recentIPSets.filter(set => (now - set.timestamp) < 60 * 60 * 1000); // Last hour
+    if (recentChanges.length >= 5) {
+      console.log(`🚫 Auto-suppressing ${domain}: ${recentChanges.length} changes in last hour`);
+      
+      // Set a long dampening period automatically
+      const autoSuppressPeriod = 4 * 60 * 60 * 1000; // 4 hours
+      await env.DNS_KV.put(lastNotificationKey, now.toString(), { expirationTtl: 7 * 24 * 60 * 60 });
+      await updateRecentIPTracking(env, domain, currentIPs, now);
+      
+      // Send one final notification about auto-suppression
+      console.log(`📢 Sending auto-suppression notice for ${domain}`);
+      return true; // This will be the last notification for a while
     }
     
     // Should send notification - update tracking
     await env.DNS_KV.put(lastNotificationKey, now.toString(), { expirationTtl: 7 * 24 * 60 * 60 }); // 7 days
     await updateRecentIPTracking(env, domain, currentIPs, now);
     
-    console.log(`✅ Sending DNS change notification for ${domain} (dampening: ${Math.round(dampeningPeriod/1000)}s)`);
+    console.log(`✅ Sending DNS change notification for ${domain} (dampening: ${Math.round(dampeningPeriod/60000)} min)`);
     return true;
     
   } catch (error) {
@@ -402,6 +501,42 @@ async function updateRecentIPTracking(env: Env, domain: string, currentIPs: stri
   } catch (error) {
     console.error(`Error updating recent IP tracking for ${domain}:`, error);
   }
+}
+
+async function sendAutoSuppressionNotification(env: Env, domain: string, previousIPs: string[], currentIPs: string[], changeCount: number): Promise<void> {
+  const embed = createEmbed('warning', 'DNS Auto-Suppression Activated');
+  embed.description = `Domain \`${domain}\` is changing too frequently - notifications suppressed for 4 hours`;
+  embed.fields = [
+    {
+      name: "🚫 Reason",
+      value: `${changeCount} IP changes detected in the last hour`,
+      inline: false
+    },
+    {
+      name: "⏰ Suppression Duration", 
+      value: "4 hours (auto-dampening)",
+      inline: true
+    },
+    {
+      name: "🔧 Action Needed",
+      value: "Check if this domain uses load balancing or CDN",
+      inline: true
+    },
+    {
+      name: "📋 Latest Change",
+      value: `${previousIPs.join(", ")} → ${currentIPs.join(", ")}`,
+      inline: false
+    },
+    {
+      name: "💡 Note",
+      value: "Use `/dampening` command to check status or clear manually",
+      inline: false
+    }
+  ];
+
+  // Only add role mention if DISCORD_ROLE_ID is set
+  const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
+  await sendDiscordMessage(env, embed, mentionContent);
 }
 
 async function checkDomain(domain: string, env: Env): Promise<void> {
@@ -490,55 +625,66 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
         const shouldNotify = await shouldSendDNSChangeNotification(env, domain, currentIPs, ttl);
         
         if (shouldNotify) {
-          // Actual change detected - send notification
-          const embed = createEmbed('change', 'DNS Change Detected');
-          embed.description = `IP addresses for \`${domain}\` have changed`;
-          embed.fields = [
-            {
-              name: "Previous IPs",
-              value: previousIPs || "none",
-              inline: false
-            },
-            {
-              name: "New IPs",
-              value: currentIPs.join(", "),
-              inline: false
-            },
-            {
-              name: "TTL",
-              value: `${ttl}`,
-              inline: true
-            },
-            {
-              name: "DNS Status",
-              value: `${dnsData.Status}`,
-              inline: true
-            },
-            {
-              name: "Record Type",
-              value: "A",
-              inline: true
-            },
-            {
-              name: "SOA Serial",
-              value: serial,
-              inline: true
-            },
-            {
-              name: "Primary NS",
-              value: soaData[0] || "unknown",
-              inline: true
-            },
-            {
-              name: "Admin Email",
-              value: soaData[1] || "unknown",
-              inline: true
-            }
-          ];
+          // Check if this is an auto-suppression notification
+          const recentIPsKey = `notify:${domain}:recent_ips`;
+          const recentIPsData = await env.DNS_KV.get(recentIPsKey);
+          const recentIPSets: Array<{ips: string[], timestamp: number}> = recentIPsData ? JSON.parse(recentIPsData) : [];
+          const recentChanges = recentIPSets.filter(set => (Date.now() - set.timestamp) < 60 * 60 * 1000);
+          
+          if (recentChanges.length >= 5) {
+            // This is the auto-suppression notification
+            await sendAutoSuppressionNotification(env, domain, previousIPsArray, currentIPs, recentChanges.length);
+          } else {
+            // Normal DNS change notification
+            const embed = createEmbed('change', 'DNS Change Detected');
+            embed.description = `IP addresses for \`${domain}\` have changed`;
+            embed.fields = [
+              {
+                name: "Previous IPs",
+                value: previousIPs || "none",
+                inline: false
+              },
+              {
+                name: "New IPs",
+                value: currentIPs.join(", "),
+                inline: false
+              },
+              {
+                name: "TTL",
+                value: `${ttl}`,
+                inline: true
+              },
+              {
+                name: "DNS Status",
+                value: `${dnsData.Status}`,
+                inline: true
+              },
+              {
+                name: "Record Type",
+                value: "A",
+                inline: true
+              },
+              {
+                name: "SOA Serial",
+                value: serial,
+                inline: true
+              },
+              {
+                name: "Primary NS",
+                value: soaData[0] || "unknown",
+                inline: true
+              },
+              {
+                name: "Admin Email",
+                value: soaData[1] || "unknown",
+                inline: true
+              }
+            ];
 
-          // Only add role mention if DISCORD_ROLE_ID is set
-          const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
-          await sendDiscordMessage(env, embed, mentionContent);
+            // Only add role mention if DISCORD_ROLE_ID is set
+            const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : undefined;
+            await sendDiscordMessage(env, embed, mentionContent);
+          }
           
           console.log(`DNS change detected for ${domain}:`);
           console.log(`Previous IPs: ${previousIPs || "none"}`);
