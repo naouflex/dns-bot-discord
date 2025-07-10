@@ -274,6 +274,52 @@ Check or clear DNS change notification dampening to prevent spam from load balan
   - **Oscillation detected:** 2-3x normal period or 30 minutes minimum
   - **Auto-suppression:** 4 hours for domains with 5+ changes per hour
 
+#### Anti-Spam Flow Diagram
+
+```mermaid
+graph TD
+    A[DNS Change Detected] --> B{First Time Monitoring?}
+    B -->|Yes| C[Store Initial State<br/>No Notification]
+    B -->|No| D[Analyze Change Pattern]
+    
+    D --> E{CDN/Cloud Provider<br/>IP Range?}
+    E -->|Yes| F{TTL ≤ 60s?}
+    F -->|Yes| G[Apply 1 Hour Dampening<br/>🌐 CDN + Low TTL]
+    F -->|No| H[Standard Dampening]
+    
+    E -->|No| I{Load Balancer<br/>Pattern?}
+    I -->|Yes| J[Apply 45 Min Dampening<br/>⚖️ Load Balancer]
+    I -->|No| K{High Frequency<br/>Changes?}
+    
+    K -->|Yes| L[Apply 30 Min Dampening<br/>⚡ High Frequency]
+    K -->|No| M[Apply Standard Dampening<br/>Based on TTL]
+    
+    G --> N{Within Dampening<br/>Period?}
+    J --> N
+    L --> N
+    H --> N
+    M --> N
+    
+    N -->|Yes| O[Update Tracking<br/>🔇 Block Notification]
+    N -->|No| P{Oscillation<br/>Detected?}
+    
+    P -->|Yes| Q{Within Extended<br/>Dampening?}
+    Q -->|Yes| R[Block with Extended Period<br/>🔄 2-3x Dampening]
+    Q -->|No| S[Check Auto-Suppression]
+    
+    P -->|No| S{5+ Changes<br/>in Last Hour?}
+    S -->|Yes| T[Send Auto-Suppression Notice<br/>🚫 4 Hour Block]
+    S -->|No| U[Send Normal Notification<br/>✅ DNS Change Alert]
+    
+    style G fill:#ff9999
+    style J fill:#ffcc99
+    style L fill:#ffff99
+    style T fill:#ff6666
+    style U fill:#99ff99
+    style O fill:#cccccc
+    style R fill:#cccccc
+```
+
 ### Domain Management
 
 #### Static vs Dynamic Domains
