@@ -234,6 +234,20 @@ Check current DNS status of a specific domain.
 - Shows primary nameserver and admin email
 - Compares with last known state
 
+#### `/dampening <domain>` **NEW!**
+Check or clear DNS change notification dampening to prevent spam from load balancers.
+- **Example:** `/dampening app.example.com`
+- **Clear dampening:** `/dampening app.example.com clear:true`
+- Shows last notification time and recent IP changes
+- Detects oscillation between IP sets (common with CDNs/load balancers)
+- Prevents notification spam from domains with low TTL that frequently change IPs
+- **Auto-dampening periods:**
+  - TTL < 60s: 10 minutes between notifications
+  - TTL < 300s: 5 minutes between notifications
+  - TTL < 900s: 2x TTL or 2 minutes minimum
+  - TTL ≥ 900s: 1x TTL or 5 minutes minimum
+  - **Oscillation detected:** 2x normal period or 15 minutes minimum
+
 ### Domain Management
 
 #### Static vs Dynamic Domains
