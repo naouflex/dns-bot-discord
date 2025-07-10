@@ -199,12 +199,23 @@ Lists all monitored domains, separated into:
 - **Total count** of monitored domains
 
 #### `/add <domain>`
-Adds a domain to DNS monitoring.
+Adds a single domain to DNS monitoring.
 - **Example:** `/add example.com`
 - Validates domain format
 - Prevents duplicate entries
 - Updates bot status automatically
 - Shows who added the domain
+
+#### `/add-with-subdomains <domain>` **NEW!**
+Discovers and adds real subdomains using Certificate Transparency logs.
+- **Example:** `/add-with-subdomains example.com`
+- **Advanced:** `/add-with-subdomains example.com verify-all:true`
+- Queries Certificate Transparency logs (crt.sh) to find real subdomains
+- Automatically adds discovered subdomains that have valid DNS records
+- Much more efficient than hardcoded subdomain lists
+- Option `verify-all`: Verifies all discovered domains are active (slower but more accurate)
+- Falls back to common subdomains if CT discovery fails
+- Discovers legitimate subdomains that actually exist with SSL certificates
 
 #### `/remove <domain>`
 Removes a domain from DNS monitoring.
@@ -251,9 +262,14 @@ The bot displays live status information:
 # List all monitored domains
 /list
 
-# Add domains to monitoring
+# Add single domain to monitoring
 /add newsite.com
-/add api.example.org
+
+# Add domain and discover all its subdomains automatically
+/add-with-subdomains github.com
+
+# Add domain with full verification (slower but more accurate)
+/add-with-subdomains example.com verify-all:true
 
 # Check specific domain status
 /status curve.finance
