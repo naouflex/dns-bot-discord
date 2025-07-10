@@ -97,7 +97,11 @@ interface DiscordInteractionResponse {
 // Discord command definitions
 const DISCORD_COMMANDS = [
   {
-    name: "add-domain",
+    name: "help",
+    description: "Show available DNS monitoring commands"
+  },
+  {
+    name: "add",
     description: "Add a domain to DNS monitoring",
     options: [
       {
@@ -109,7 +113,7 @@ const DISCORD_COMMANDS = [
     ]
   },
   {
-    name: "remove-domain", 
+    name: "remove", 
     description: "Remove a domain from DNS monitoring",
     options: [
       {
@@ -121,11 +125,11 @@ const DISCORD_COMMANDS = [
     ]
   },
   {
-    name: "list-domains",
+    name: "list",
     description: "List all monitored domains"
   },
   {
-    name: "domain-status",
+    name: "status",
     description: "Check current status of a specific domain",
     options: [
       {
@@ -514,6 +518,72 @@ async function registerCommands(env: Env): Promise<void> {
   }
 }
 
+async function updateBotStatus(env: Env, totalDomains: number, lastCheckTime: string): Promise<void> {
+  if (!env.DISCORD_BOT_TOKEN) {
+    console.log("Discord bot token not set, skipping status update");
+    return;
+  }
+
+  // Get bot user info first to get the bot's ID
+  const userResponse = await fetch("https://discord.com/api/v10/users/@me", {
+    headers: {
+      "Authorization": `Bot ${env.DISCORD_BOT_TOKEN}`,
+    },
+  });
+
+  if (!userResponse.ok) {
+    console.error("Failed to get bot user info for status update");
+    return;
+  }
+
+  const botUser = await userResponse.json();
+  
+  // Create gateway connection to set presence
+  // Note: For Cloudflare Workers, we'll store the status and display it in responses
+  // Since we can't maintain a persistent gateway connection
+  
+  try {
+    // Store the status information in KV for display purposes
+    const statusInfo = {
+      online: true,
+      lastCheck: lastCheckTime,
+      domainsMonitored: totalDomains,
+      activity: `Watching ${totalDomains} domains`,
+      updatedAt: new Date().toISOString()
+    };
+    
+    await env.DNS_KV.put("bot:status", JSON.stringify(statusInfo));
+    console.log(`✅ Bot status updated: Watching ${totalDomains} domains (Last check: ${lastCheckTime})`);
+  } catch (error) {
+    console.error("Error updating bot status:", error);
+  }
+}
+
+async function getBotStatus(env: Env): Promise<any> {
+  try {
+    const statusData = await env.DNS_KV.get("bot:status");
+    if (statusData) {
+      return JSON.parse(statusData);
+    }
+    return {
+      online: false,
+      lastCheck: "Never",
+      domainsMonitored: 0,
+      activity: "Offline",
+      updatedAt: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error("Error getting bot status:", error);
+    return {
+      online: false,
+      lastCheck: "Error",
+      domainsMonitored: 0,
+      activity: "Error",
+      updatedAt: new Date().toISOString()
+    };
+  }
+}
+
 async function getDynamicDomains(env: Env): Promise<string[]> {
   try {
     const domainsData = await env.DNS_KV.get("dynamic:domains");
@@ -577,28 +647,33 @@ async function handleAddDomain(interaction: DiscordInteraction, env: Env): Promi
       };
     }
 
-    domains.push(domain);
-    await saveDynamicDomains(env, domains);
+         domains.push(domain);
+     await saveDynamicDomains(env, domains);
 
-    const embed = createEmbed('update', 'Domain Added');
-    embed.description = `Successfully added \`${domain}\` to DNS monitoring`;
-    embed.fields = [
-      {
-        name: "Domain",
-        value: domain,
-        inline: true
-      },
-      {
-        name: "Total Domains", 
-        value: domains.length.toString(),
-        inline: true
-      },
-      {
-        name: "Added By",
-        value: interaction.member?.user?.username || interaction.user?.username || "Unknown",
-        inline: true
-      }
-    ];
+     // Update bot status with new domain count
+     const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+     const totalDomains = staticDomains.length + domains.length;
+     await updateBotStatus(env, totalDomains, new Date().toISOString());
+
+     const embed = createEmbed('update', 'Domain Added');
+     embed.description = `Successfully added \`${domain}\` to DNS monitoring`;
+     embed.fields = [
+       {
+         name: "Domain",
+         value: domain,
+         inline: true
+       },
+       {
+         name: "Total Domains", 
+         value: totalDomains.toString(),
+         inline: true
+       },
+       {
+         name: "Added By",
+         value: interaction.member?.user?.username || interaction.user?.username || "Unknown",
+         inline: true
+       }
+     ];
 
     return {
       type: 4,
@@ -645,33 +720,38 @@ async function handleRemoveDomain(interaction: DiscordInteraction, env: Env): Pr
       };
     }
 
-    domains.splice(domainIndex, 1);
-    await saveDynamicDomains(env, domains);
+         domains.splice(domainIndex, 1);
+     await saveDynamicDomains(env, domains);
 
-    // Clean up stored DNS data for this domain
-    await env.DNS_KV.delete(`dns:${domain}:ips`);
-    await env.DNS_KV.delete(`dns:${domain}:serial`);
-    await env.DNS_KV.delete(`dns:${domain}:state`);
+     // Clean up stored DNS data for this domain
+     await env.DNS_KV.delete(`dns:${domain}:ips`);
+     await env.DNS_KV.delete(`dns:${domain}:serial`);
+     await env.DNS_KV.delete(`dns:${domain}:state`);
 
-    const embed = createEmbed('update', 'Domain Removed');
-    embed.description = `Successfully removed \`${domain}\` from DNS monitoring`;
-    embed.fields = [
-      {
-        name: "Domain",
-        value: domain,
-        inline: true
-      },
-      {
-        name: "Remaining Domains",
-        value: domains.length.toString(),
-        inline: true
-      },
-      {
-        name: "Removed By",
-        value: interaction.member?.user?.username || interaction.user?.username || "Unknown",
-        inline: true
-      }
-    ];
+     // Update bot status with new domain count
+     const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+     const totalDomains = staticDomains.length + domains.length;
+     await updateBotStatus(env, totalDomains, new Date().toISOString());
+
+     const embed = createEmbed('update', 'Domain Removed');
+     embed.description = `Successfully removed \`${domain}\` from DNS monitoring`;
+     embed.fields = [
+       {
+         name: "Domain",
+         value: domain,
+         inline: true
+       },
+       {
+         name: "Remaining Domains",
+         value: totalDomains.toString(),
+         inline: true
+       },
+       {
+         name: "Removed By",
+         value: interaction.member?.user?.username || interaction.user?.username || "Unknown",
+         inline: true
+       }
+     ];
 
     return {
       type: 4,
@@ -767,15 +847,15 @@ async function handleDomainStatus(interaction: DiscordInteraction, env: Env): Pr
     const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
     const allDomains = [...staticDomains, ...dynamicDomains];
     
-    if (!allDomains.includes(domain)) {
-      return {
-        type: 4,
-        data: {
-          content: `⚠️ Domain \`${domain}\` is not currently being monitored. Use \`/add-domain\` to start monitoring it.`,
-          flags: 64
-        }
-      };
-    }
+         if (!allDomains.includes(domain)) {
+       return {
+         type: 4,
+         data: {
+           content: `⚠️ Domain \`${domain}\` is not currently being monitored. Use \`/add\` to start monitoring it.`,
+           flags: 64
+         }
+       };
+     }
 
     // Get current DNS data
     const dnsData = await queryDNS(domain);
@@ -853,6 +933,55 @@ async function handleDomainStatus(interaction: DiscordInteraction, env: Env): Pr
   }
 }
 
+async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+  const botStatus = await getBotStatus(env);
+  const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+  const dynamicDomains = await getDynamicDomains(env);
+  const totalDomains = staticDomains.length + dynamicDomains.length;
+  
+  const embed = createEmbed('update', 'DNS Monitor Bot Commands');
+  embed.description = "Available commands for managing DNS monitoring:";
+  embed.fields = [
+    {
+      name: "🤖 Bot Status",
+      value: `**Activity:** ${botStatus.activity}\n**Last Check:** ${botStatus.lastCheck}\n**Domains Monitored:** ${totalDomains}`,
+      inline: false
+    },
+    {
+      name: "📋 `/list`",
+      value: "Show all monitored domains (static + dynamic)",
+      inline: false
+    },
+    {
+      name: "➕ `/add <domain>`",
+      value: "Add a domain to monitoring\nExample: `/add example.com`",
+      inline: false
+    },
+    {
+      name: "➖ `/remove <domain>`",
+      value: "Remove a domain from monitoring\nExample: `/remove example.com`",
+      inline: false
+    },
+    {
+      name: "📊 `/status <domain>`",
+      value: "Check current DNS status of a domain\nExample: `/status example.com`",
+      inline: false
+    },
+    {
+      name: "ℹ️ About",
+      value: "This bot monitors DNS changes and sends notifications when IP addresses or DNS records change.",
+      inline: false
+    }
+  ];
+
+  return {
+    type: 4,
+    data: {
+      embeds: [embed]
+    }
+  };
+}
+
 async function handleDiscordInteraction(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
   // Handle ping
   if (interaction.type === 1) {
@@ -864,19 +993,21 @@ async function handleDiscordInteraction(interaction: DiscordInteraction, env: En
     const commandName = interaction.data?.name;
     
     switch (commandName) {
-      case "add-domain":
+      case "help":
+        return await handleHelp(interaction, env);
+      case "add":
         return await handleAddDomain(interaction, env);
-      case "remove-domain":
+      case "remove":
         return await handleRemoveDomain(interaction, env);
-      case "list-domains":
+      case "list":
         return await handleListDomains(interaction, env);
-      case "domain-status":
+      case "status":
         return await handleDomainStatus(interaction, env);
       default:
         return {
           type: 4,
           data: {
-            content: "❌ Unknown command",
+            content: "❌ Unknown command. Use `/help` to see available commands.",
             flags: 64
           }
         };
@@ -969,15 +1100,18 @@ export default {
           console.error("❌ Failed to send deployment notification:", error);
         }
         
-        // Register Discord commands on new deployment
-        if (env.DISCORD_BOT_TOKEN && env.DISCORD_APPLICATION_ID) {
-          try {
-            await registerCommands(env);
-            console.log("✅ Discord commands registered");
-          } catch (error) {
-            console.error("❌ Failed to register Discord commands:", error);
-          }
-        }
+                 // Register Discord commands on new deployment
+         if (env.DISCORD_BOT_TOKEN && env.DISCORD_APPLICATION_ID) {
+           try {
+             await registerCommands(env);
+             console.log("✅ Discord commands registered");
+             
+             // Set initial bot status
+             await updateBotStatus(env, allDomains.length, new Date().toISOString());
+           } catch (error) {
+             console.error("❌ Failed to register Discord commands:", error);
+           }
+         }
         
         // After notification, store the new version ID
         console.log(`Storing worker version ID: ${env.WORKER_VERSION_ID}`);
@@ -986,9 +1120,18 @@ export default {
     }
     
     console.log("Starting domain checks...");
+    const checkStartTime = new Date().toISOString();
+    
     // Check each domain
     for (const domain of allDomains) {
       await checkDomain(domain, env);
+    }
+    
+    // Update bot status after checking domains
+    try {
+      await updateBotStatus(env, allDomains.length, checkStartTime);
+    } catch (error) {
+      console.error("Failed to update bot status:", error);
     }
     
     console.log("===== WORKER EXECUTION COMPLETE =====");
@@ -1031,55 +1174,79 @@ export default {
       }
     }
     
-    // Handle command registration endpoint (for manual registration)
-    if (request.method === "POST" && url.pathname === "/register-commands") {
-      if (!env.DISCORD_BOT_TOKEN || !env.DISCORD_APPLICATION_ID) {
-        return new Response("Discord bot configuration missing", { status: 400 });
-      }
-      
-      try {
-        await registerCommands(env);
-        return new Response("Commands registered successfully", { 
-          headers: { "Content-Type": "text/plain" } 
-        });
-      } catch (error) {
-        console.error("Error registering commands:", error);
-        return new Response(`Failed to register commands: ${error}`, { status: 500 });
-      }
-    }
+         // Handle command registration endpoint (for manual registration)
+     if (request.method === "POST" && url.pathname === "/register-commands") {
+       if (!env.DISCORD_BOT_TOKEN || !env.DISCORD_APPLICATION_ID) {
+         return new Response("Discord bot configuration missing", { status: 400 });
+       }
+       
+       try {
+         await registerCommands(env);
+         
+         // Update bot status after registering commands
+         const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+         const dynamicDomains = await getDynamicDomains(env);
+         const totalDomains = staticDomains.length + dynamicDomains.length;
+         await updateBotStatus(env, totalDomains, new Date().toISOString());
+         
+         return new Response("Commands registered successfully", { 
+           headers: { "Content-Type": "text/plain" } 
+         });
+       } catch (error) {
+         console.error("Error registering commands:", error);
+         return new Response(`Failed to register commands: ${error}`, { status: 500 });
+       }
+     }
     
-    // Handle status endpoint
-    if (request.method === "GET" && url.pathname === "/status") {
-      const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
-      const dynamicDomains = await getDynamicDomains(env);
-      
-      const status = {
-        status: "running",
-        version: env.WORKER_VERSION_ID || "unknown",
-        discordBotConfigured: !!(env.DISCORD_BOT_TOKEN && env.DISCORD_APPLICATION_ID && env.DISCORD_PUBLIC_KEY),
-        webhookConfigured: !!env.DISCORD_WEBHOOK_URL,
-        staticDomains: staticDomains,
-        dynamicDomains: dynamicDomains,
-        totalDomains: staticDomains.length + dynamicDomains.length,
-        lastUpdated: new Date().toISOString()
-      };
-      
-      return new Response(JSON.stringify(status, null, 2), {
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+         // Handle status endpoint
+     if (request.method === "GET" && url.pathname === "/status") {
+       const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+       const dynamicDomains = await getDynamicDomains(env);
+       const botStatus = await getBotStatus(env);
+       
+       const status = {
+         worker: {
+           status: "running",
+           version: env.WORKER_VERSION_ID || "unknown",
+           discordBotConfigured: !!(env.DISCORD_BOT_TOKEN && env.DISCORD_APPLICATION_ID && env.DISCORD_PUBLIC_KEY),
+           webhookConfigured: !!env.DISCORD_WEBHOOK_URL,
+           lastUpdated: new Date().toISOString()
+         },
+         bot: {
+           online: botStatus.online,
+           activity: botStatus.activity,
+           lastCheck: botStatus.lastCheck,
+           updatedAt: botStatus.updatedAt
+         },
+         domains: {
+           static: staticDomains,
+           dynamic: dynamicDomains,
+           total: staticDomains.length + dynamicDomains.length
+         }
+       };
+       
+       return new Response(JSON.stringify(status, null, 2), {
+         headers: { "Content-Type": "application/json" },
+       });
+     }
     
-    // Default response for other requests
-    return new Response(
-      "DNS Monitor Worker with Discord Bot\n\n" +
-      "Endpoints:\n" +
-      "POST / - Discord interactions\n" +
-      "POST /register-commands - Manual command registration\n" +
-      "GET /status - Worker status\n\n" +
-      "This worker monitors DNS changes and provides Discord bot commands for domain management.",
-      {
-        headers: { "Content-Type": "text/plain" },
-      }
-    );
+         // Default response for other requests
+     return new Response(
+       "DNS Monitor Worker with Discord Bot\n\n" +
+       "Endpoints:\n" +
+       "POST / - Discord interactions\n" +
+       "POST /register-commands - Manual command registration\n" +
+       "GET /status - Worker status\n\n" +
+       "Discord Commands:\n" +
+       "/help - Show available commands\n" +
+       "/list - List monitored domains\n" +
+       "/add <domain> - Add domain to monitoring\n" +
+       "/remove <domain> - Remove domain from monitoring\n" +
+       "/status <domain> - Check domain status\n\n" +
+       "This worker monitors DNS changes and provides Discord bot commands for domain management.",
+       {
+         headers: { "Content-Type": "text/plain" },
+       }
+     );
   },
 };
