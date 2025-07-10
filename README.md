@@ -207,16 +207,28 @@ Adds a single domain to DNS monitoring.
 - Shows who added the domain
 - **Note:** Initial DNS state is recorded silently (no false "change detected" alerts)
 
-#### `/add-with-subdomains <domain>` **NEW!**
-Discovers and adds real subdomains using Certificate Transparency logs.
+#### `/add-with-subdomains <domain>` 
+Quick subdomain discovery using Certificate Transparency logs.
 - **Example:** `/add-with-subdomains example.com`
 - **Advanced:** `/add-with-subdomains example.com verify-all:true`
 - Queries Certificate Transparency logs (crt.sh) to find real subdomains
-- Automatically adds discovered subdomains that have valid DNS records
-- Much more efficient than hardcoded subdomain lists
+- Fast discovery mode optimized for Discord's 3-second timeout
 - Option `verify-all`: Verifies all discovered domains are active (slower but more accurate)
 - Falls back to common subdomains if CT discovery fails
 - Discovers legitimate subdomains that actually exist with SSL certificates
+
+#### `/discover <domain>` **NEW!**
+Comprehensive subdomain discovery using multiple methods with full verification.
+- **Example:** `/discover example.com`
+- **Uses multiple discovery methods:**
+  - Certificate Transparency logs (multiple sources including wildcard searches)
+  - DNS enumeration with common prefixes
+  - Comprehensive wordlist fallback (80+ common subdomains)
+- **Full verification:** All discovered domains are tested for active DNS records
+- **Longer timeout:** 5-15 seconds for thorough discovery
+- **Deferred response:** Uses Discord's deferred response for operations longer than 3 seconds
+- **Smart prioritization:** Root domain first, then shorter domains (likely more important)
+- **No limits:** Processes up to 500 domains in thorough mode vs 100 in quick mode
 - **Note:** Initial DNS state is recorded silently for all new domains (no false alerts)
 
 #### `/remove <domain>`
@@ -281,11 +293,14 @@ The bot displays live status information:
 # Add single domain to monitoring
 /add newsite.com
 
-# Add domain and discover all its subdomains automatically
+# Add domain and discover subdomains quickly (optimized for Discord timeout)
 /add-with-subdomains github.com
 
 # Add domain with full verification (slower but more accurate)
 /add-with-subdomains example.com verify-all:true
+
+# Thorough subdomain discovery using all methods (takes longer, finds more)
+/discover github.com
 
 # Check specific domain status
 /status curve.finance
