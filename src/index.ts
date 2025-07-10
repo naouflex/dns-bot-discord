@@ -114,7 +114,7 @@ const DISCORD_COMMANDS = [
   },
   {
     name: "add-with-subdomains", 
-    description: "Add a domain and discover real subdomains using Certificate Transparency logs (may take 5-10s)",
+    description: "Add a domain and discover real subdomains using Certificate Transparency logs (fast: 3-5s)",
     options: [
       {
         name: "domain",
@@ -883,8 +883,8 @@ async function discoverSubdomainsFromCT(domain: string, quickMode: boolean = fal
     ctSources.push(`https://crt.sh/?q=${encodeURIComponent(domain)}&deduplicate=Y&output=json`);
   }
   
-  const timeout = quickMode ? 2000 : 8000; // Aggressive timeout for quick mode (Discord responsiveness)
-  const maxResults = quickMode ? 100 : 1000; // Fewer results in quick mode for faster response
+  const timeout = quickMode ? 1000 : 8000; // Very aggressive timeout for quick mode (1s)
+  const maxResults = quickMode ? 50 : 1000; // Even fewer results in quick mode
   
   console.log(`🔍 Querying Certificate Transparency logs for ${domain} (${quickMode ? 'quick' : 'thorough'} mode)...`);
   
@@ -1084,56 +1084,96 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
   const currentDomains = await getDynamicDomains(env);
   
   try {
-    // Adaptive timeout based on verify mode  
-    const quickMode = !verifyAll; // Quick mode when not verifying all
-    const maxDiscoveryTime = quickMode ? 4000 : 15000; // 4s quick, 15s thorough (more aggressive for Discord)
-    const maxDomains = quickMode ? 50 : 500; // Fewer domains in quick mode to avoid timeout
+    // More aggressive settings for quick mode
+    const quickMode = !verifyAll;
+    const maxDiscoveryTime = quickMode ? 3000 : 15000; // 3s for quick mode
+    const maxDomains = quickMode ? 25 : 500; // Even fewer domains for quick mode
     
     console.log(`🔍 Starting subdomain discovery for ${domain} (${quickMode ? 'quick' : 'thorough'} mode)`);
     const discoveryStartTime = Date.now();
     
     let allDiscoveredDomains = new Set<string>();
     
-    // Method 1: Certificate Transparency discovery
-    try {
-      console.log(`📡 Phase 1: Certificate Transparency discovery`);
-      const ctDomains = await discoverSubdomainsFromCT(domain, quickMode);
-      ctDomains.forEach(d => allDiscoveredDomains.add(d));
-      console.log(`✅ CT discovery found ${ctDomains.length} domains`);
-    } catch (error) {
-      console.error('CT discovery failed:', error);
-      result.errors.push('CT discovery failed');
-    }
-    
-    // Method 2: DNS enumeration (if we have time and not too many from CT)
-    if (Date.now() - discoveryStartTime < maxDiscoveryTime / 2 && allDiscoveredDomains.size < 50) {
+    if (quickMode) {
+      // Quick mode: Run discovery methods in parallel with aggressive timeouts
+      console.log(`⚡ Quick mode: Running parallel discovery with 2s timeout`);
+      
+      const discoveryPromises = [
+        // CT discovery with very short timeout
+        discoverSubdomainsFromCT(domain, true).catch(error => {
+          console.log(`CT discovery failed: ${error.message}`);
+          return [];
+        }),
+        
+                 // Fallback wordlist immediately available (top priority subdomains only)
+         Promise.resolve(['www', 'api', 'app', 'mail', 'cdn', 'static', 'admin', 'dev', 'test', 'staging'].map(sub => `${sub}.${domain}`))
+      ];
+      
       try {
-        console.log(`📡 Phase 2: DNS enumeration`);
-        const dnsDomains = await discoverSubdomainsFromDNS(domain);
-        dnsDomains.forEach(d => allDiscoveredDomains.add(d));
-        console.log(`✅ DNS enumeration found ${dnsDomains.length} additional domains`);
+        // Race all discovery methods with 2-second timeout
+        const discoveryResults = await Promise.race([
+          Promise.allSettled(discoveryPromises),
+          new Promise<never>((_, reject) => 
+            setTimeout(() => reject(new Error('Discovery methods timeout')), 2000)
+          )
+        ]);
+        
+        // Combine results from all successful methods
+        for (const promiseResult of discoveryResults) {
+          if (promiseResult.status === 'fulfilled') {
+            promiseResult.value.forEach(d => allDiscoveredDomains.add(d));
+          }
+        }
+        
+        console.log(`⚡ Quick discovery found ${allDiscoveredDomains.size} domains`);
+        
       } catch (error) {
-        console.error('DNS enumeration failed:', error);
+        console.log(`⚡ Quick discovery timeout, using fallback only`);
+        // Use basic fallback if everything fails
+        FALLBACK_SUBDOMAINS.slice(0, 10).forEach(sub => 
+          allDiscoveredDomains.add(`${sub}.${domain}`)
+        );
       }
-    }
-    
-    // Method 3: Fallback to comprehensive wordlist if CT failed
-    if (allDiscoveredDomains.size === 0) {
-      console.log(`📡 Phase 3: Fallback wordlist discovery`);
-      const fallbackDomains = FALLBACK_SUBDOMAINS.map(sub => `${sub}.${domain}`);
-      fallbackDomains.forEach(d => allDiscoveredDomains.add(d));
-      console.log(`✅ Fallback wordlist added ${fallbackDomains.length} domains to check`);
+      
+    } else {
+      // Thorough mode: Sequential with longer timeouts
+      try {
+        console.log(`📡 Thorough: Certificate Transparency discovery`);
+        const ctDomains = await discoverSubdomainsFromCT(domain, false);
+        ctDomains.forEach(d => allDiscoveredDomains.add(d));
+        console.log(`✅ CT discovery found ${ctDomains.length} domains`);
+      } catch (error) {
+        console.error('CT discovery failed:', error);
+      }
+      
+      // DNS enumeration if we have time
+      if (Date.now() - discoveryStartTime < maxDiscoveryTime / 2) {
+        try {
+          console.log(`📡 Thorough: DNS enumeration`);
+          const dnsDomains = await discoverSubdomainsFromDNS(domain);
+          dnsDomains.forEach(d => allDiscoveredDomains.add(d));
+          console.log(`✅ DNS enumeration found ${dnsDomains.length} additional domains`);
+        } catch (error) {
+          console.error('DNS enumeration failed:', error);
+        }
+      }
+      
+      // Fallback if nothing found
+      if (allDiscoveredDomains.size === 0) {
+        console.log(`📡 Using comprehensive fallback wordlist`);
+        FALLBACK_SUBDOMAINS.forEach(sub => allDiscoveredDomains.add(`${sub}.${domain}`));
+      }
     }
     
     // Always include root domain
     allDiscoveredDomains.add(domain);
     
-    // Convert to array and apply limits
+    // Convert to array and apply aggressive limits for quick mode
     let discoveredDomains = Array.from(allDiscoveredDomains);
     
     if (discoveredDomains.length > maxDomains) {
-      console.log(`⚠️ Found ${discoveredDomains.length} domains, limiting to ${maxDomains} for ${quickMode ? 'quick' : 'thorough'} mode`);
-      // Prioritize: root domain first, then shorter domains (likely more important)
+      console.log(`⚠️ Found ${discoveredDomains.length} domains, limiting to ${maxDomains}`);
+      // Prioritize: root domain first, then shorter domains
       discoveredDomains = discoveredDomains
         .sort((a, b) => {
           if (a === domain) return -1;
@@ -1145,11 +1185,11 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
 
     console.log(`📋 Processing ${discoveredDomains.length} discovered domains`);
 
-    // Process discovered domains
+    // Process domains with different strategies for quick vs thorough mode
     for (const checkDomain of discoveredDomains) {
-      // Check timeout
+      // Aggressive timeout check
       if (Date.now() - discoveryStartTime > maxDiscoveryTime) {
-        console.log(`⏰ Discovery timeout reached after ${maxDiscoveryTime}ms, processed ${result.added.length + result.existing.length} domains`);
+        console.log(`⏰ Discovery timeout after ${maxDiscoveryTime}ms`);
         break;
       }
       
@@ -1157,39 +1197,30 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
         // Skip if already being monitored
         if (currentDomains.includes(checkDomain)) {
           result.existing.push(checkDomain);
-          console.log(`📋 Already monitored: ${checkDomain}`);
           continue;
         }
 
-        // Verification strategy
         let shouldAdd = false;
         
-        if (!verifyAll && (allDiscoveredDomains.size > 10 || quickMode)) {
-          // Skip verification for large CT discovery sets or in quick mode to save time
+        if (quickMode) {
+          // Quick mode: Add everything without verification to save time
           shouldAdd = true;
-          console.log(`🚀 Added without verification (${quickMode ? 'quick mode' : 'large set'}): ${checkDomain}`);
+        } else if (!verifyAll && allDiscoveredDomains.size > 15) {
+          // Thorough mode but large set: skip verification for speed
+          shouldAdd = true;
         } else {
-          // Verify domain resolution with timeout
+          // Full verification mode
           try {
             const exists = await Promise.race([
               checkSubdomainExists(checkDomain),
               new Promise<boolean>((_, reject) => 
-                setTimeout(() => reject(new Error('DNS check timeout')), 2000)
+                setTimeout(() => reject(new Error('DNS timeout')), 1500)
               )
             ]);
             shouldAdd = exists;
-            if (exists) {
-              console.log(`✅ Verified active: ${checkDomain}`);
-            } else {
-              console.log(`⏭️ Not resolving: ${checkDomain}`);
-            }
           } catch (dnsError) {
-            console.log(`⚠️ DNS check failed for ${checkDomain}: ${dnsError instanceof Error ? dnsError.message : String(dnsError)}`);
-            // In quick mode, assume it exists if we can't verify quickly
-            shouldAdd = quickMode;
-            if (shouldAdd) {
-              console.log(`🚀 Added without verification (DNS timeout): ${checkDomain}`);
-            }
+            // On timeout, assume it exists to avoid losing domains
+            shouldAdd = true;
           }
         }
         
@@ -1199,17 +1230,19 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
           result.skipped.push(checkDomain);
         }
         
-        // Variable delay based on mode
-        const delay = quickMode ? 5 : 20;
-        await new Promise(resolve => setTimeout(resolve, delay));
+        // No delays in quick mode
+        if (!quickMode) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
         
       } catch (error) {
         result.errors.push(checkDomain);
-        console.error(`❌ Error checking ${checkDomain}:`, error);
+        console.error(`❌ Error processing ${checkDomain}:`, error);
       }
     }
 
-    console.log(`🎯 Discovery complete (${Math.round((Date.now() - discoveryStartTime) / 1000)}s): ${result.added.length} new, ${result.existing.length} existing, ${result.skipped.length} inactive, ${result.errors.length} errors`);
+    const duration = Math.round((Date.now() - discoveryStartTime) / 1000);
+    console.log(`🎯 Discovery complete (${duration}s): ${result.added.length} new, ${result.existing.length} existing`);
 
   } catch (error) {
     console.error('Error in subdomain discovery:', error);
@@ -1745,7 +1778,7 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
           skipped: string[];
           errors: string[];
         }>((_, reject) => 
-          setTimeout(() => reject(new Error('Discovery timeout after 8 seconds')), 8000)
+          setTimeout(() => reject(new Error('Discovery timeout after 5 seconds')), 5000)
         )
       ]);
     } catch (discoveryError) {
@@ -2239,7 +2272,7 @@ async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<Di
     },
     {
       name: "🔍 `/add-with-subdomains <domain>`",
-      value: "Fast subdomain discovery using Certificate Transparency logs\nExample: `/add-with-subdomains example.com`\nOption: `verify-all` to verify all discovered domains are active\n⏱️ Takes 5-10 seconds (deferred response)",
+      value: "Fast subdomain discovery using Certificate Transparency logs\nExample: `/add-with-subdomains example.com`\nOption: `verify-all` to verify all discovered domains are active\n⏱️ Takes 3-5 seconds (optimized for speed)",
       inline: false
     },
     {
