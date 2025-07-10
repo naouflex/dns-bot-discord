@@ -114,7 +114,7 @@ const DISCORD_COMMANDS = [
   },
   {
     name: "add-with-subdomains",
-    description: "Add a domain and discover real subdomains using Certificate Transparency logs",
+    description: "Add a domain and discover real subdomains using Certificate Transparency logs (quick)",
     options: [
       {
         name: "domain",
@@ -127,6 +127,18 @@ const DISCORD_COMMANDS = [
         description: "Verify all discovered domains are active (slower but more accurate)",
         type: 5, // BOOLEAN
         required: false
+      }
+    ]
+  },
+  {
+    name: "discover",
+    description: "Thorough subdomain discovery using multiple methods with full verification",
+    options: [
+      {
+        name: "domain",
+        description: "Domain name to perform comprehensive subdomain discovery for",
+        type: 3, // STRING
+        required: true
       }
     ]
   },
@@ -853,6 +865,11 @@ async function discoverSubdomainsFromCT(domain: string, quickMode: boolean = fal
     `https://crt.sh/?q=${encodeURIComponent(domain)}&output=json`,
     `https://crt.sh/?q=%.${encodeURIComponent(domain)}&output=json`
   ];
+  
+  // Add third source if not in quick mode
+  if (!quickMode) {
+    ctSources.push(`https://crt.sh/?q=${encodeURIComponent(domain)}&deduplicate=Y&output=json`);
+  }
   
   const timeout = quickMode ? 3000 : 8000; // More time when not in quick mode
   const maxResults = quickMode ? 200 : 1000; // More results when not in quick mode
@@ -1805,6 +1822,177 @@ async function handleDampening(interaction: DiscordInteraction, env: Env): Promi
   }
 }
 
+async function handleDiscoverThorough(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+  const domain = interaction.data?.options?.find(opt => opt.name === "domain")?.value?.toLowerCase();
+  
+  if (!domain) {
+    return {
+      type: 4,
+      data: {
+        content: "❌ Please provide a domain name.",
+        flags: 64
+      }
+    };
+  }
+
+  if (!isValidDomain(domain)) {
+    return {
+      type: 4,
+      data: {
+        content: `❌ Invalid domain format: \`${domain}\``,
+        flags: 64
+      }
+    };
+  }
+
+  // Defer the response since this will take longer than 3 seconds
+  const deferResponse = {
+    type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    data: {}
+  };
+
+  try {
+    // Check if root domain is already being monitored
+    const domains = await getDynamicDomains(env);
+    const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+    const allCurrentDomains = [...staticDomains, ...domains];
+    
+    const rootAlreadyExists = allCurrentDomains.includes(domain);
+
+    // Thorough discovery with verification (verifyAll = true)
+    console.log(`🔍 Starting thorough subdomain discovery for ${domain}...`);
+    const discovery = await discoverSubdomains(domain, env, true);
+    
+    // Add root domain if not already monitored
+    if (!rootAlreadyExists) {
+      domains.push(domain);
+      if (!discovery.added.includes(domain)) {
+        discovery.added.unshift(domain);
+      }
+    }
+    
+    // Add discovered subdomains
+    for (const subdomain of discovery.added.filter(d => d !== domain)) {
+      if (!domains.includes(subdomain)) {
+        domains.push(subdomain);
+      }
+    }
+    
+    // Save to KV
+    if (discovery.added.length > 0) {
+      await env.DNS_KV.put("dynamic:domains", JSON.stringify(domains));
+    }
+
+    // Build response
+    const embed = createEmbed('update', 'Thorough Subdomain Discovery Complete');
+    embed.description = `Completed comprehensive discovery for \`${domain}\` using multiple methods and verification`;
+    
+    const fields = [];
+    
+    if (discovery.added.length > 0) {
+      const addedText = discovery.added.length > 15 
+        ? `${discovery.added.slice(0, 10).map(d => `\`${d}\``).join(", ")} and ${discovery.added.length - 10} more...`
+        : discovery.added.map(d => `\`${d}\``).join(", ");
+      
+      fields.push({
+        name: `✅ Added (${discovery.added.length})`,
+        value: addedText,
+        inline: false
+      });
+    }
+    
+    if (discovery.existing.length > 0) {
+      const existingText = discovery.existing.length > 10 
+        ? `${discovery.existing.slice(0, 5).map(d => `\`${d}\``).join(", ")} and ${discovery.existing.length - 5} more...`
+        : discovery.existing.map(d => `\`${d}\``).join(", ");
+      
+      fields.push({
+        name: `📋 Already Monitored (${discovery.existing.length})`,
+        value: existingText,
+        inline: false
+      });
+    }
+    
+    if (discovery.skipped.length > 0) {
+      fields.push({
+        name: `⏭️ Verified Inactive (${discovery.skipped.length})`,
+        value: discovery.skipped.length > 5 
+          ? `${discovery.skipped.slice(0, 3).map(d => `\`${d}\``).join(", ")} and ${discovery.skipped.length - 3} more...`
+          : discovery.skipped.slice(0, 5).map(d => `\`${d}\``).join(", "),
+        inline: false
+      });
+    }
+    
+    if (discovery.errors.length > 0) {
+      fields.push({
+        name: `❌ Errors (${discovery.errors.length})`,
+        value: `${discovery.errors.length} domains had verification errors`,
+        inline: false
+      });
+    }
+    
+    fields.push({
+      name: "📊 Discovery Summary",
+      value: `**Method:** Multi-source CT + DNS enumeration + wordlist\n**Verification:** All domains verified\n**Total Monitored:** ${domains.length}\n**By:** ${interaction.member?.user?.username || interaction.user?.username || "Unknown"}`,
+      inline: false
+    });
+    
+    if (discovery.added.length > 0) {
+      fields.push({
+        name: "ℹ️ Note",
+        value: "Initial DNS state will be recorded for new domains without triggering alerts",
+        inline: false
+      });
+    }
+    
+    embed.fields = fields;
+
+    // Send followup response to the deferred interaction
+    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
+    
+    await fetch(followupUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        embeds: [embed]
+      })
+    });
+
+    return deferResponse;
+    
+  } catch (error) {
+    console.error('Error in handleDiscoverThorough:', error);
+    
+    // Try to send error as followup
+    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
+    
+    try {
+      await fetch(followupUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          content: `❌ Error during thorough discovery: ${error instanceof Error ? error.message : String(error)}`
+        })
+      });
+      
+      return deferResponse;
+    } catch (followupError) {
+      // If we can't send followup, return error response directly
+      return {
+        type: 4,
+        data: {
+          content: `❌ Error during thorough discovery: ${error instanceof Error ? error.message : String(error)}`,
+          flags: 64
+        }
+      };
+    }
+  }
+}
+
 async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
   const botStatus = await getBotStatus(env);
   const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
@@ -1831,7 +2019,12 @@ async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<Di
     },
     {
       name: "🔍 `/add-with-subdomains <domain>`",
-      value: "Discover real subdomains using Certificate Transparency logs\nExample: `/add-with-subdomains example.com`\nOption: `verify-all` to verify all discovered domains are active",
+      value: "Quick subdomain discovery using Certificate Transparency logs\nExample: `/add-with-subdomains example.com`\nOption: `verify-all` to verify all discovered domains are active",
+      inline: false
+    },
+    {
+      name: "🕵️ `/discover <domain>`",
+      value: "Thorough subdomain discovery using multiple methods with full verification\nExample: `/discover example.com`\nUses CT logs + DNS enumeration + wordlist with complete validation",
       inline: false
     },
     {
@@ -1879,8 +2072,10 @@ async function handleDiscordInteraction(interaction: DiscordInteraction, env: En
         return await handleHelp(interaction, env);
       case "add":
         return await handleAddDomain(interaction, env);
-      case "add-with-subdomains":
-        return await handleAddWithSubdomains(interaction, env);
+          case "add-with-subdomains":
+      return await handleAddWithSubdomains(interaction, env);
+    case "discover":
+      return await handleDiscoverThorough(interaction, env);
       case "remove":
         return await handleRemoveDomain(interaction, env);
       case "list":
