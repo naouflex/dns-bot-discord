@@ -113,6 +113,24 @@ const DISCORD_COMMANDS = [
     ]
   },
   {
+    name: "add-with-subdomains",
+    description: "Add a domain and discover real subdomains using Certificate Transparency logs",
+    options: [
+      {
+        name: "domain",
+        description: "Domain name to discover and monitor subdomains for (e.g., example.com)",
+        type: 3, // STRING
+        required: true
+      },
+      {
+        name: "verify-all",
+        description: "Verify all discovered domains are active (slower but more accurate)",
+        type: 5, // BOOLEAN
+        required: false
+      }
+    ]
+  },
+  {
     name: "remove", 
     description: "Remove a domain from DNS monitoring",
     options: [
@@ -673,6 +691,191 @@ function isValidDomain(domain: string): boolean {
   return domainRegex.test(domain) && domain.length <= 253;
 }
 
+// Certificate Transparency API response structure
+interface CTLogEntry {
+  name_value: string;
+  common_name: string;
+  not_before: string;
+  not_after: string;
+  issuer_name: string;
+}
+
+async function discoverSubdomainsFromCT(domain: string): Promise<string[]> {
+  try {
+    console.log(`🔍 Querying Certificate Transparency logs for ${domain}...`);
+    
+    // Query crt.sh API for certificates
+    const response = await fetch(`https://crt.sh/?q=${encodeURIComponent(domain)}&output=json`, {
+      headers: {
+        'User-Agent': 'DNS-Monitor-Bot/1.0'
+      }
+    });
+
+    if (!response.ok) {
+      console.error(`CT API error: ${response.status} ${response.statusText}`);
+      return [];
+    }
+
+    const certificates: CTLogEntry[] = await response.json();
+    console.log(`📜 Found ${certificates.length} certificates in CT logs`);
+
+    const subdomains = new Set<string>();
+
+    for (const cert of certificates) {
+      // Extract domains from both common_name and name_value (SAN)
+      const domains = cert.name_value.split('\n').concat([cert.common_name]);
+      
+      for (let certDomain of domains) {
+        certDomain = certDomain.trim().toLowerCase();
+        
+        // Skip wildcards and invalid entries
+        if (certDomain.startsWith('*') || !certDomain.includes('.')) {
+          continue;
+        }
+        
+        // Check if it's a subdomain of our target domain
+        if (certDomain.endsWith(`.${domain}`) || certDomain === domain) {
+          // Validate domain format
+          if (isValidDomain(certDomain)) {
+            subdomains.add(certDomain);
+          }
+        }
+      }
+    }
+
+    const result = Array.from(subdomains).sort();
+    console.log(`✅ Discovered ${result.length} unique domains from CT logs`);
+    return result;
+
+  } catch (error) {
+    console.error('Error querying Certificate Transparency logs:', error);
+    return [];
+  }
+}
+
+// Fallback common subdomains (used only if CT lookup fails)
+const FALLBACK_SUBDOMAINS = [
+  'www', 'api', 'app', 'mail', 'cdn', 'static', 'm', 'mobile', 
+  'admin', 'dashboard', 'portal', 'secure', 'login', 'auth',
+  'blog', 'shop', 'store', 'support', 'help', 'docs'
+];
+
+async function checkSubdomainExists(subdomain: string): Promise<boolean> {
+  try {
+    const server = "https://1.1.1.1/dns-query";
+    const url = new URL(server);
+    url.searchParams.append("name", subdomain);
+    url.searchParams.append("type", "A");
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/dns-json",
+      },
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const dnsData: DNSResponse = await response.json();
+    
+    // Check if we got A records and no errors
+    return dnsData.Status === 0 && 
+           dnsData.Answer !== undefined && 
+           dnsData.Answer.length > 0 &&
+           dnsData.Answer.some(record => record.type === 1); // A record
+  } catch (error) {
+    console.error(`Error checking subdomain ${subdomain}:`, error);
+    return false;
+  }
+}
+
+async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean = false): Promise<{
+  existing: string[];
+  added: string[];
+  skipped: string[];
+  errors: string[];
+}> {
+  const result = {
+    existing: [] as string[],
+    added: [] as string[],
+    skipped: [] as string[],
+    errors: [] as string[]
+  };
+
+  // Get current dynamic domains to check for duplicates
+  const currentDomains = await getDynamicDomains(env);
+  
+  try {
+    // First try Certificate Transparency discovery
+    console.log(`🔍 Starting subdomain discovery for ${domain}`);
+    let discoveredDomains = await discoverSubdomainsFromCT(domain);
+    let usedCTDiscovery = discoveredDomains.length > 0;
+    
+    // If CT discovery fails or returns few results, use fallback method
+    if (discoveredDomains.length === 0) {
+      console.log(`⚠️ CT discovery failed, using fallback method`);
+      discoveredDomains = FALLBACK_SUBDOMAINS.map(sub => `${sub}.${domain}`);
+      discoveredDomains.push(domain); // Include root domain
+      usedCTDiscovery = false;
+    }
+
+    console.log(`📋 Found ${discoveredDomains.length} potential domains to check`);
+
+    // Check each discovered domain
+    for (const checkDomain of discoveredDomains) {
+      try {
+        // Skip if already being monitored
+        if (currentDomains.includes(checkDomain)) {
+          result.existing.push(checkDomain);
+          console.log(`📋 Already monitored: ${checkDomain}`);
+          continue;
+        }
+
+        // Verification strategy based on discovery method and user preference
+        let shouldAdd = false;
+        
+        if (usedCTDiscovery && !verifyAll) {
+          // CT-discovered domains are likely valid, add without verification for speed
+          shouldAdd = true;
+          console.log(`🚀 Added from CT (unverified): ${checkDomain}`);
+        } else {
+          // Verify domain resolution for fallback domains or when verify-all is enabled
+          const exists = await checkSubdomainExists(checkDomain);
+          shouldAdd = exists;
+          if (exists) {
+            console.log(`✅ Verified active: ${checkDomain}`);
+          } else {
+            console.log(`⏭️ Not resolving: ${checkDomain}`);
+          }
+        }
+        
+        if (shouldAdd) {
+          result.added.push(checkDomain);
+        } else {
+          result.skipped.push(checkDomain);
+        }
+        
+        // Small delay to avoid overwhelming DNS servers
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
+      } catch (error) {
+        result.errors.push(checkDomain);
+        console.error(`❌ Error checking ${checkDomain}:`, error);
+      }
+    }
+
+    console.log(`🎯 Discovery complete: ${result.added.length} new, ${result.existing.length} existing, ${result.skipped.length} inactive, ${result.errors.length} errors`);
+
+  } catch (error) {
+    console.error('Error in subdomain discovery:', error);
+    result.errors.push(`Discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return result;
+}
+
 async function handleAddDomain(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
   const domain = interaction.data?.options?.[0]?.value?.toLowerCase();
   
@@ -995,6 +1198,132 @@ async function handleDomainStatus(interaction: DiscordInteraction, env: Env): Pr
   }
 }
 
+async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
+  const domain = interaction.data?.options?.find(opt => opt.name === "domain")?.value?.toLowerCase();
+  const verifyAllOption = interaction.data?.options?.find(opt => opt.name === "verify-all")?.value;
+  const verifyAll = Boolean(verifyAllOption);
+  
+  if (!domain) {
+    return {
+      type: 4,
+      data: {
+        content: "❌ Please provide a domain name.",
+        flags: 64
+      }
+    };
+  }
+
+  if (!isValidDomain(domain)) {
+    return {
+      type: 4,
+      data: {
+        content: `❌ Invalid domain format: \`${domain}\``,
+        flags: 64
+      }
+    };
+  }
+
+  try {
+    // First check if root domain is already being monitored
+    const domains = await getDynamicDomains(env);
+    const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
+    const allCurrentDomains = [...staticDomains, ...domains];
+    
+    const rootAlreadyExists = allCurrentDomains.includes(domain);
+
+    // Discover subdomains
+    const discovery = await discoverSubdomains(domain, env, verifyAll);
+    
+    // Add root domain if not already monitored
+    if (!rootAlreadyExists) {
+      domains.push(domain);
+      discovery.added.unshift(domain); // Add to beginning of list
+    }
+    
+    // Add discovered subdomains
+    for (const subdomain of discovery.added.filter(d => d !== domain)) {
+      if (!domains.includes(subdomain)) {
+        domains.push(subdomain);
+      }
+    }
+    
+    // Save updated domains
+    await saveDynamicDomains(env, domains);
+
+    // Update bot status
+    const totalDomains = staticDomains.length + domains.length;
+    await updateBotStatus(env, totalDomains, new Date().toISOString());
+
+    // Create response embed
+    const embed = createEmbed('update', 'Domain Discovery Complete');
+    embed.description = `Completed subdomain discovery for \`${domain}\``;
+    
+    const fields = [];
+    
+    if (discovery.added.length > 0) {
+      fields.push({
+        name: `✅ Added (${discovery.added.length})`,
+        value: discovery.added.map(d => `\`${d}\``).join(", "),
+        inline: false
+      });
+    }
+    
+    if (discovery.existing.length > 0) {
+      fields.push({
+        name: `📋 Already Monitored (${discovery.existing.length})`,
+        value: discovery.existing.map(d => `\`${d}\``).join(", "),
+        inline: false
+      });
+    }
+    
+    if (discovery.skipped.length > 0 && discovery.skipped.length <= 10) {
+      fields.push({
+        name: `⏭️ Not Found (${discovery.skipped.length})`,
+        value: discovery.skipped.slice(0, 10).map(d => `\`${d}\``).join(", "),
+        inline: false
+      });
+    } else if (discovery.skipped.length > 10) {
+      fields.push({
+        name: `⏭️ Not Found (${discovery.skipped.length})`,
+        value: `${discovery.skipped.slice(0, 5).map(d => `\`${d}\``).join(", ")} and ${discovery.skipped.length - 5} more...`,
+        inline: false
+      });
+    }
+    
+    if (discovery.errors.length > 0) {
+      fields.push({
+        name: `❌ Errors (${discovery.errors.length})`,
+        value: discovery.errors.map(d => `\`${d}\``).join(", "),
+        inline: false
+      });
+    }
+    
+    fields.push({
+      name: "📊 Summary",
+      value: `**Total Domains:** ${totalDomains}\n**Added by:** ${interaction.member?.user?.username || interaction.user?.username || "Unknown"}\n**Verification:** ${verifyAll ? "All domains verified" : "Standard discovery"}`,
+      inline: false
+    });
+    
+    embed.fields = fields;
+
+    return {
+      type: 4,
+      data: {
+        embeds: [embed]
+      }
+    };
+  } catch (error) {
+    console.error("Error in subdomain discovery:", error);
+    return {
+      type: 4,
+      data: {
+        content: `❌ Failed to discover subdomains: ${error instanceof Error ? error.message : String(error)}`,
+        flags: 64
+      }
+    };
+  }
+}
+
 async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
   const botStatus = await getBotStatus(env);
   const staticDomains = env.MONITOR_DOMAINS ? env.MONITOR_DOMAINS.split(",").map(d => d.trim()) : [];
@@ -1016,7 +1345,12 @@ async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<Di
     },
     {
       name: "➕ `/add <domain>`",
-      value: "Add a domain to monitoring\nExample: `/add example.com`",
+      value: "Add a single domain to monitoring\nExample: `/add example.com`",
+      inline: false
+    },
+    {
+      name: "🔍 `/add-with-subdomains <domain>`",
+      value: "Discover real subdomains using Certificate Transparency logs\nExample: `/add-with-subdomains example.com`\nOption: `verify-all` to verify all discovered domains are active",
       inline: false
     },
     {
@@ -1059,6 +1393,8 @@ async function handleDiscordInteraction(interaction: DiscordInteraction, env: En
         return await handleHelp(interaction, env);
       case "add":
         return await handleAddDomain(interaction, env);
+      case "add-with-subdomains":
+        return await handleAddWithSubdomains(interaction, env);
       case "remove":
         return await handleRemoveDomain(interaction, env);
       case "list":
