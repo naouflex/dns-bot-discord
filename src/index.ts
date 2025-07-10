@@ -518,122 +518,45 @@ async function registerCommands(env: Env): Promise<void> {
   }
 }
 
-async function updateDiscordPresence(env: Env, activityName: string): Promise<boolean> {
+// Note: Cloudflare Workers cannot maintain persistent WebSocket connections
+// required for Discord bot presence. The bot will appear offline in Discord
+// but will still respond to slash commands perfectly.
+
+async function updateBotDescription(env: Env, totalDomains: number, lastCheckTime: string): Promise<boolean> {
   try {
-    // Get gateway URL
-    const gatewayResponse = await fetch("https://discord.com/api/v10/gateway/bot", {
+    const checkTime = new Date(lastCheckTime);
+    const timeString = checkTime.toLocaleTimeString('en-US', { 
+      hour12: false, 
+      hour: '2-digit', 
+      minute: '2-digit',
+      timeZone: 'UTC'
+    });
+    
+    // Update the application description instead of presence
+    // This shows up in the bot's profile and when hovering over the bot
+    const description = `DNS Monitor Bot - Watching ${totalDomains} domains | Last check: ${timeString} UTC | Click for commands: /help`;
+    
+    const response = await fetch(`https://discord.com/api/v10/applications/@me`, {
+      method: "PATCH",
       headers: {
         "Authorization": `Bot ${env.DISCORD_BOT_TOKEN}`,
+        "Content-Type": "application/json"
       },
+      body: JSON.stringify({
+        description: description.substring(0, 400) // Discord has a 400 char limit
+      })
     });
     
-    if (!gatewayResponse.ok) {
-      throw new Error("Failed to get gateway URL");
+    if (response.ok) {
+      console.log(`✅ Bot description updated: ${description}`);
+      return true;
+    } else {
+      const errorText = await response.text();
+      console.log(`⚠️ Failed to update bot description: ${errorText}`);
+      return false;
     }
-    
-    const gatewayData: { url: string; session_start_limit: any } = await gatewayResponse.json();
-    const wsUrl = `${gatewayData.url}?v=10&encoding=json`;
-    
-    // Create WebSocket connection for presence update
-    const ws = new WebSocket(wsUrl);
-    
-    return new Promise((resolve) => {
-      let heartbeatInterval: any;
-      let identified = false;
-      
-      const cleanup = () => {
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
-        try {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.close();
-          }
-        } catch (e) {
-          // Ignore close errors
-        }
-      };
-      
-      const timeout = setTimeout(() => {
-        cleanup();
-        resolve(false);
-      }, 10000); // 10 second timeout
-      
-      ws.onopen = () => {
-        console.log("WebSocket connected for presence update");
-      };
-      
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data.toString());
-          
-          if (data.op === 10) { // Hello
-            const heartbeatMs = data.d.heartbeat_interval;
-            console.log(`Received hello, heartbeat interval: ${heartbeatMs}ms`);
-            
-            // Start heartbeat
-            heartbeatInterval = setInterval(() => {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ op: 1, d: null }));
-              }
-            }, heartbeatMs);
-            
-            // Send identify
-            ws.send(JSON.stringify({
-              op: 2,
-              d: {
-                token: env.DISCORD_BOT_TOKEN,
-                intents: 0, // No intents needed for presence
-                properties: {
-                  $os: "linux",
-                  $browser: "cloudflare-worker",
-                  $device: "cloudflare-worker"
-                },
-                presence: {
-                  activities: [{
-                    name: activityName,
-                    type: 3 // Watching
-                  }],
-                  status: "online",
-                  since: null,
-                  afk: false
-                }
-              }
-            }));
-          } else if (data.op === 0 && data.t === "READY") {
-            console.log("Bot identified successfully, presence should be updated");
-            identified = true;
-            clearTimeout(timeout);
-            
-            // Wait a moment then close connection
-            setTimeout(() => {
-              cleanup();
-              resolve(true);
-            }, 2000);
-          } else if (data.op === 11) { // Heartbeat ACK
-            console.log("Heartbeat acknowledged");
-          }
-        } catch (error) {
-          console.error("Error processing WebSocket message:", error);
-        }
-      };
-      
-      ws.onerror = (error) => {
-        console.error("WebSocket error:", error);
-        clearTimeout(timeout);
-        cleanup();
-        resolve(false);
-      };
-      
-      ws.onclose = () => {
-        console.log("WebSocket closed");
-        clearTimeout(timeout);
-        cleanup();
-        if (!identified) {
-          resolve(false);
-        }
-      };
-    });
   } catch (error) {
-    console.error("Error creating WebSocket connection:", error);
+    console.error("Error updating bot description:", error);
     return false;
   }
 }
@@ -667,20 +590,20 @@ async function updateBotStatus(env: Env, totalDomains: number, lastCheckTime: st
     
     await env.DNS_KV.put("bot:status", JSON.stringify(statusInfo));
     
-    // Try to update Discord presence via WebSocket
-    console.log(`Attempting to update Discord presence: ${activityName}`);
-    
-    try {
-      const presenceUpdated = await updateDiscordPresence(env, activityName);
-      if (presenceUpdated) {
-        console.log(`✅ Discord presence updated successfully: ${activityName}`);
-      } else {
-        console.log(`⚠️ Discord presence update failed, status stored in KV only`);
-      }
-    } catch (presenceError) {
-      console.error("Error updating Discord presence:", presenceError);
-      console.log(`⚠️ Presence update failed, but status stored in KV: ${activityName}`);
-    }
+         // Try to update Discord bot description (since presence requires persistent connection)
+     console.log(`Attempting to update Discord bot description: ${activityName}`);
+     
+     try {
+       const descriptionUpdated = await updateBotDescription(env, totalDomains, lastCheckTime);
+       if (descriptionUpdated) {
+         console.log(`✅ Discord bot description updated successfully`);
+       } else {
+         console.log(`⚠️ Discord bot description update failed, status stored in KV only`);
+       }
+     } catch (descriptionError) {
+       console.error("Error updating Discord bot description:", descriptionError);
+       console.log(`⚠️ Description update failed, but status stored in KV: ${activityName}`);
+     }
     
   } catch (error) {
     console.error("Error updating bot status:", error);
