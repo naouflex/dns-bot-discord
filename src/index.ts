@@ -1831,18 +1831,46 @@ async function performListDomainsAsync(interaction: DiscordInteraction, env: Env
 }
 
 async function handleListDomains(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
-  // Send deferred response (shows "Bot is thinking...")
-  const deferredResponse = {
+  // Defer the response since this might take time with many domains
+  const deferResponse = {
     type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
     data: {}
   };
 
-  // Start the async listing process (fire and forget)
-  performListDomainsAsync(interaction, env).catch(error => {
-    console.error("Async list failed:", error);
-  });
-
-  return deferredResponse;
+  try {
+    // Do the actual work and send followup BEFORE returning
+    await performListDomainsAsync(interaction, env);
+    return deferResponse;
+    
+  } catch (error) {
+    console.error("Error listing domains:", error);
+    
+    // Try to send error as followup
+    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
+    
+    try {
+      await fetch(followupUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          content: `❌ Failed to list domains: ${error instanceof Error ? error.message : String(error)}`
+        })
+      });
+      
+      return deferResponse;
+    } catch (followupError) {
+      console.error("Failed to send followup error:", followupError);
+      return {
+        type: 4,
+        data: {
+          content: `❌ Failed to list domains: ${error instanceof Error ? error.message : String(error)}`,
+          flags: 64
+        }
+      };
+    }
+  }
 }
 
 async function handleDomainStatus(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
@@ -2135,22 +2163,47 @@ async function handleAddWithSubdomains(interaction: DiscordInteraction, env: Env
     };
   }
 
-  // Send immediate response so user knows command was received
-  const immediateResponse = {
-    type: 4,
-    data: {
-      content: `🔍 **Subdomain discovery started for \`${domain}\`**\n\n⏳ Scanning Certificate Transparency logs and DNS records...\n💡 Results will appear in a new message when complete (usually 3-8 seconds)`,
-      flags: 0 // Make it visible to everyone
-    }
+  // Defer the response since this might take longer than 3 seconds
+  const deferResponse = {
+    type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    data: {}
   };
 
-  // Start the async discovery process (fire and forget)
-  // Note: We don't await this to avoid Discord timeout
-  performSubdomainDiscoveryAsync(interaction, env, domain, verifyAll).catch(error => {
-    console.error("Async discovery failed:", error);
-  });
-
-  return immediateResponse;
+  try {
+    // Do the actual work and send followup BEFORE returning
+    await performSubdomainDiscoveryAsync(interaction, env, domain, verifyAll);
+    return deferResponse;
+    
+  } catch (error) {
+    console.error("Error in subdomain discovery:", error);
+    
+    // Try to send error as followup
+    const followupUrl = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}`;
+    
+    try {
+      await fetch(followupUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          content: `❌ Failed to discover subdomains: ${error instanceof Error ? error.message : String(error)}`
+        })
+      });
+      
+      return deferResponse;
+    } catch (followupError) {
+      // If we can't send followup, return error response directly
+      console.error("Failed to send followup error:", followupError);
+      return {
+        type: 4,
+        data: {
+          content: `❌ Failed to discover subdomains: ${error instanceof Error ? error.message : String(error)}`,
+          flags: 64
+        }
+      };
+    }
+  }
 }
 
 async function handleDampening(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
