@@ -32,9 +32,11 @@ jobs:
             echo "❌ DISCORD_WEBHOOK_URL is not set"
             exit 1
           fi
-          if [ -z "${{ secrets.DISCORD_ROLE_ID }}" ]; then
-            echo "❌ DISCORD_ROLE_ID is not set"
-            exit 1
+          # DISCORD_ROLE_ID is optional
+          if [ -n "${{ secrets.DISCORD_ROLE_ID }}" ]; then
+            echo "✅ DISCORD_ROLE_ID is set"
+          else
+            echo "ℹ️ DISCORD_ROLE_ID is not set (optional)"
           fi
           echo "✅ All required secrets are set"
 

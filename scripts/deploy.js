@@ -149,7 +149,7 @@ async function setupDiscordWebhook() {
   }
 }
 
-// Check and set up Discord role tag
+// Check and set up Discord role tag (optional)
 async function setupDiscordRoleTag() {
   let roleTag = process.env.DISCORD_ROLE_ID;
   if (roleTag) {
@@ -170,15 +170,19 @@ async function setupDiscordRoleTag() {
       });
       console.log("✅ Discord role tag is already set");
     } catch (error) {
-      const roleTag = await prompt("Enter your Discord role ID to mention (without @ symbol): ");
-      try {
-        execSync(`echo '${roleTag}' | npx wrangler secret put DISCORD_ROLE_ID`, {
-          stdio: "inherit"
-        });
-        console.log("✅ Discord role tag set successfully");
-      } catch (error) {
-        console.error("❌ Failed to set Discord role tag:", error.message);
-        process.exit(1);
+      const roleTag = await prompt("Enter your Discord role ID to mention (without @ symbol) or press Enter to skip: ");
+      if (roleTag.trim()) {
+        try {
+          execSync(`echo '${roleTag}' | npx wrangler secret put DISCORD_ROLE_ID`, {
+            stdio: "inherit"
+          });
+          console.log("✅ Discord role tag set successfully");
+        } catch (error) {
+          console.error("❌ Failed to set Discord role tag:", error.message);
+          process.exit(1);
+        }
+      } else {
+        console.log("ℹ️ Discord role tag skipped (optional)");
       }
     }
   }
