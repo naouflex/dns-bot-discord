@@ -114,7 +114,7 @@ const DISCORD_COMMANDS = [
   },
   {
     name: "add-with-subdomains", 
-    description: "Add domain + subdomains via Certificate Transparency logs - instant feedback, results in new message",
+    description: "Add domain + subdomains via Certificate Transparency logs (shows thinking, then results)",
     options: [
       {
         name: "domain",
@@ -156,7 +156,7 @@ const DISCORD_COMMANDS = [
   },
   {
     name: "remove-with-subdomains",
-    description: "Remove domain + all subdomains from monitoring - instant feedback, results in new message",
+    description: "Remove domain + all subdomains from monitoring (shows thinking, then results)",
     options: [
       {
         name: "domain",
@@ -168,7 +168,7 @@ const DISCORD_COMMANDS = [
   },
   {
     name: "list",
-    description: "List all monitored domains - instant feedback, complete list in new message"
+    description: "List all monitored domains (shows thinking, then complete list)"
   },
   {
     name: "status",
@@ -1734,13 +1734,10 @@ async function handleRemoveWithSubdomains(interaction: DiscordInteraction, env: 
     };
   }
 
-  // Send immediate response so user knows command was received
-  const immediateResponse = {
-    type: 4,
-    data: {
-      content: `🗑️ **Starting bulk removal for \`${domain}\`**\n\n⏳ Scanning for domain and all subdomains...\n💡 Removal results will appear in a new message when complete`,
-      flags: 0 // Make it visible to everyone
-    }
+  // Send deferred response (shows "Bot is thinking...")
+  const deferredResponse = {
+    type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    data: {}
   };
 
   // Start the async removal process (fire and forget)
@@ -1748,7 +1745,7 @@ async function handleRemoveWithSubdomains(interaction: DiscordInteraction, env: 
     console.error("Async removal failed:", error);
   });
 
-  return immediateResponse;
+  return deferredResponse;
 }
 
 async function performListDomainsAsync(interaction: DiscordInteraction, env: Env): Promise<void> {
@@ -1834,13 +1831,10 @@ async function performListDomainsAsync(interaction: DiscordInteraction, env: Env
 }
 
 async function handleListDomains(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
-  // Send immediate response so user knows command was received
-  const immediateResponse = {
-    type: 4,
-    data: {
-      content: `📋 **Loading domain list...**\n\n⏳ Fetching static and dynamic domains...\n💡 Complete list will appear in a new message momentarily`,
-      flags: 0 // Make it visible to everyone
-    }
+  // Send deferred response (shows "Bot is thinking...")
+  const deferredResponse = {
+    type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    data: {}
   };
 
   // Start the async listing process (fire and forget)
@@ -1848,7 +1842,7 @@ async function handleListDomains(interaction: DiscordInteraction, env: Env): Pro
     console.error("Async list failed:", error);
   });
 
-  return immediateResponse;
+  return deferredResponse;
 }
 
 async function handleDomainStatus(interaction: DiscordInteraction, env: Env): Promise<DiscordInteractionResponse> {
