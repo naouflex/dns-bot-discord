@@ -1128,11 +1128,11 @@ async function discoverSubdomains(domain: string, env: Env, verifyAll: boolean =
         console.log(`⚡ Quick discovery found ${allDiscoveredDomains.size} domains`);
         
       } catch (error) {
-        console.log(`⚡ Quick discovery timeout, using fallback only`);
-        // Use basic fallback if everything fails
-        FALLBACK_SUBDOMAINS.slice(0, 10).forEach(sub => 
-          allDiscoveredDomains.add(`${sub}.${domain}`)
-        );
+                 console.log(`⚡ Quick discovery timeout, using minimal fallback`);
+         // Use minimal fallback if everything fails
+         ['www', 'api', 'app', 'mail', 'cdn'].forEach(sub => 
+           allDiscoveredDomains.add(`${sub}.${domain}`)
+         );
       }
       
     } else {
