@@ -518,32 +518,174 @@ async function registerCommands(env: Env): Promise<void> {
   }
 }
 
+async function updateDiscordPresence(env: Env, activityName: string): Promise<boolean> {
+  try {
+    // Get gateway URL
+    const gatewayResponse = await fetch("https://discord.com/api/v10/gateway/bot", {
+      headers: {
+        "Authorization": `Bot ${env.DISCORD_BOT_TOKEN}`,
+      },
+    });
+    
+    if (!gatewayResponse.ok) {
+      throw new Error("Failed to get gateway URL");
+    }
+    
+    const gatewayData: { url: string; session_start_limit: any } = await gatewayResponse.json();
+    const wsUrl = `${gatewayData.url}?v=10&encoding=json`;
+    
+    // Create WebSocket connection for presence update
+    const ws = new WebSocket(wsUrl);
+    
+    return new Promise((resolve) => {
+      let heartbeatInterval: any;
+      let identified = false;
+      
+      const cleanup = () => {
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        try {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.close();
+          }
+        } catch (e) {
+          // Ignore close errors
+        }
+      };
+      
+      const timeout = setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, 10000); // 10 second timeout
+      
+      ws.onopen = () => {
+        console.log("WebSocket connected for presence update");
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data.toString());
+          
+          if (data.op === 10) { // Hello
+            const heartbeatMs = data.d.heartbeat_interval;
+            console.log(`Received hello, heartbeat interval: ${heartbeatMs}ms`);
+            
+            // Start heartbeat
+            heartbeatInterval = setInterval(() => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ op: 1, d: null }));
+              }
+            }, heartbeatMs);
+            
+            // Send identify
+            ws.send(JSON.stringify({
+              op: 2,
+              d: {
+                token: env.DISCORD_BOT_TOKEN,
+                intents: 0, // No intents needed for presence
+                properties: {
+                  $os: "linux",
+                  $browser: "cloudflare-worker",
+                  $device: "cloudflare-worker"
+                },
+                presence: {
+                  activities: [{
+                    name: activityName,
+                    type: 3 // Watching
+                  }],
+                  status: "online",
+                  since: null,
+                  afk: false
+                }
+              }
+            }));
+          } else if (data.op === 0 && data.t === "READY") {
+            console.log("Bot identified successfully, presence should be updated");
+            identified = true;
+            clearTimeout(timeout);
+            
+            // Wait a moment then close connection
+            setTimeout(() => {
+              cleanup();
+              resolve(true);
+            }, 2000);
+          } else if (data.op === 11) { // Heartbeat ACK
+            console.log("Heartbeat acknowledged");
+          }
+        } catch (error) {
+          console.error("Error processing WebSocket message:", error);
+        }
+      };
+      
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        clearTimeout(timeout);
+        cleanup();
+        resolve(false);
+      };
+      
+      ws.onclose = () => {
+        console.log("WebSocket closed");
+        clearTimeout(timeout);
+        cleanup();
+        if (!identified) {
+          resolve(false);
+        }
+      };
+    });
+  } catch (error) {
+    console.error("Error creating WebSocket connection:", error);
+    return false;
+  }
+}
+
 async function updateBotStatus(env: Env, totalDomains: number, lastCheckTime: string): Promise<void> {
   if (!env.DISCORD_BOT_TOKEN) {
     console.log("Discord bot token not set, skipping status update");
     return;
   }
 
-  // Get bot user info first to get the bot's ID
-  const userResponse = await fetch("https://discord.com/api/v10/users/@me", {
-    headers: {
-      "Authorization": `Bot ${env.DISCORD_BOT_TOKEN}`,
-    },
-  });
-
-  if (!userResponse.ok) {
-    console.error("Failed to get bot user info for status update");
-    return;
-  }
-
-  const botUser = await userResponse.json();
-  
-  // Create gateway connection to set presence
-  // Note: For Cloudflare Workers, we'll store the status and display it in responses
-  // Since we can't maintain a persistent gateway connection
-  
   try {
+    // Format the last check time to be more readable
+    const checkTime = new Date(lastCheckTime);
+    const timeString = checkTime.toLocaleTimeString('en-US', { 
+      hour12: false, 
+      hour: '2-digit', 
+      minute: '2-digit'
+    });
+    
+    // Create activity status with last check time
+    const activityName = `${totalDomains} domains | Last: ${timeString} UTC`;
+    
     // Store the status information in KV for display purposes
+    const statusInfo = {
+      online: true,
+      lastCheck: lastCheckTime,
+      domainsMonitored: totalDomains,
+      activity: activityName,
+      updatedAt: new Date().toISOString()
+    };
+    
+    await env.DNS_KV.put("bot:status", JSON.stringify(statusInfo));
+    
+    // Try to update Discord presence via WebSocket
+    console.log(`Attempting to update Discord presence: ${activityName}`);
+    
+    try {
+      const presenceUpdated = await updateDiscordPresence(env, activityName);
+      if (presenceUpdated) {
+        console.log(`✅ Discord presence updated successfully: ${activityName}`);
+      } else {
+        console.log(`⚠️ Discord presence update failed, status stored in KV only`);
+      }
+    } catch (presenceError) {
+      console.error("Error updating Discord presence:", presenceError);
+      console.log(`⚠️ Presence update failed, but status stored in KV: ${activityName}`);
+    }
+    
+  } catch (error) {
+    console.error("Error updating bot status:", error);
+    
+    // Fallback: Just store in KV
     const statusInfo = {
       online: true,
       lastCheck: lastCheckTime,
@@ -553,9 +695,6 @@ async function updateBotStatus(env: Env, totalDomains: number, lastCheckTime: st
     };
     
     await env.DNS_KV.put("bot:status", JSON.stringify(statusInfo));
-    console.log(`✅ Bot status updated: Watching ${totalDomains} domains (Last check: ${lastCheckTime})`);
-  } catch (error) {
-    console.error("Error updating bot status:", error);
   }
 }
 
