@@ -215,6 +215,10 @@ const DISCORD_COMMANDS = [
         required: false
       }
     ]
+  },
+  {
+    name: "config",
+    description: "Show bot configuration and environment status"
   }
 ];
 
@@ -513,6 +517,26 @@ function createEmbed(type: 'error' | 'warning' | 'change' | 'update', title: str
       text: "DNS Monitor Bot"
     }
   };
+}
+
+// Utility function to validate Discord role ID
+function validateDiscordRoleId(roleId?: string): { isValid: boolean; cleanId?: string; reason?: string } {
+  if (!roleId) {
+    return { isValid: false, reason: 'Role ID not provided' };
+  }
+  
+  const cleanId = roleId.trim();
+  
+  if (cleanId === '') {
+    return { isValid: false, reason: 'Role ID is empty' };
+  }
+  
+  // Discord snowflake IDs are 17-19 digit numbers
+  if (!/^\d{17,19}$/.test(cleanId)) {
+    return { isValid: false, reason: `Invalid format: "${cleanId}" (expected 17-19 digit number)` };
+  }
+  
+  return { isValid: true, cleanId };
 }
 
 async function queryDNS(domain: string): Promise<DNSResponse> {
@@ -1306,8 +1330,14 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
             ];
           }
 
-          // Only add role mention if DISCORD_ROLE_ID is set
-          const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : ``;
+          // Only add role mention if DISCORD_ROLE_ID is set and valid
+          const roleValidation = validateDiscordRoleId(env.DISCORD_ROLE_ID);
+          const mentionContent = roleValidation.isValid ? `<@&${roleValidation.cleanId}>` : '';
+          
+          if (env.DISCORD_ROLE_ID && !roleValidation.isValid) {
+            console.log(`⚠️ Invalid DISCORD_ROLE_ID: ${roleValidation.reason}`);
+          }
+          
           await sendDiscordMessage(env, embed, mentionContent);
           
           console.log(`✅ Enhanced DNS change notification sent for ${domain}:`);
@@ -3127,6 +3157,11 @@ async function handleHelp(interaction: DiscordInteraction, env: Env): Promise<Di
       inline: false
     },
     {
+      name: "⚙️ `/config`",
+      value: "Check bot configuration and environment status\nShows webhook, role, domain, and bot status information\n*Note: Only visible to you*",
+      inline: false
+    },
+    {
       name: "ℹ️ About",
       value: "This bot monitors DNS changes and sends notifications when IP addresses or DNS records change.",
       inline: false
@@ -3217,6 +3252,18 @@ export default {
     console.log(`Static domains: ${staticDomains.join(", ") || "none"}`);
     console.log(`Dynamic domains: ${dynamicDomains.join(", ") || "none"}`);
     console.log(`Total domains to check: ${allDomains.length}`);
+    
+    // Validate environment configuration
+    const roleValidation = validateDiscordRoleId(env.DISCORD_ROLE_ID);
+    if (env.DISCORD_ROLE_ID) {
+      if (roleValidation.isValid) {
+        console.log(`✅ Discord role ID configured: ${roleValidation.cleanId}`);
+      } else {
+        console.log(`⚠️ Invalid Discord role ID configured: ${roleValidation.reason}`);
+      }
+    } else {
+      console.log(`ℹ️ No Discord role ID configured (notifications will not mention roles)`);
+    }
     
     // Store version ID in KV if it exists and notify about new deployments
     if (env.WORKER_VERSION_ID) {
