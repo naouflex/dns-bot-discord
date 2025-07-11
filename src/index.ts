@@ -264,10 +264,11 @@ class IntelligentNotificationBuilder {
     cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
     lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>,
     timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>,
-    soaData?: string[]
+    soaData?: string[],
+    coordinatedInfo?: { isCoordinated: boolean; confidence: number; analysis: string; relatedDomains: string[] }
   ): DiscordEmbed {
     const embed: DiscordEmbed = {
-      title: this.getSmartTitle(context, cdnInfo, lbInfo, timeInfo),
+      title: this.getSmartTitle(context, cdnInfo, lbInfo, timeInfo, coordinatedInfo),
       description: `IP addresses for \`${domain}\` have changed`,
       color: this.getSeverityColor(context.severity),
       fields: [
@@ -312,6 +313,15 @@ class IntelligentNotificationBuilder {
       });
     }
 
+    // Add coordinated change information
+    if (coordinatedInfo?.isCoordinated) {
+      embed.fields!.push({
+        name: "🌐 Coordinated Infrastructure Change",
+        value: `**Analysis:** ${coordinatedInfo.analysis}\n**Related Domains:** ${coordinatedInfo.relatedDomains.slice(0, 3).map(d => `\`${d}\``).join(', ')}${coordinatedInfo.relatedDomains.length > 3 ? ` and ${coordinatedInfo.relatedDomains.length - 3} more...` : ''}`,
+        inline: false
+      });
+    }
+
     // Add technical details
     embed.fields!.push({
       name: "🔧 Technical Details",
@@ -330,7 +340,7 @@ class IntelligentNotificationBuilder {
     // Add recommended actions based on context
     embed.fields!.push({
       name: "💡 Recommended Actions",
-      value: this.getRecommendedActions(context, cdnInfo, lbInfo, timeInfo),
+      value: this.getRecommendedActions(context, cdnInfo, lbInfo, timeInfo, coordinatedInfo),
       inline: false
     });
 
@@ -399,8 +409,10 @@ class IntelligentNotificationBuilder {
     context: ChangeContext,
     cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
     lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>,
-    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>
+    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>,
+    coordinatedInfo?: { isCoordinated: boolean; confidence: number; analysis: string; relatedDomains: string[] }
   ): string {
+    if (coordinatedInfo?.isCoordinated) return '🌐 Coordinated Infrastructure Change Detected';
     if (context.severity === 'critical') return '🚨 Critical DNS Change Detected';
     if (lbInfo.isLoadBalancer && lbInfo.pattern === 'failover') return '🔄 Load Balancer Failover Detected';
     if (cdnInfo.isAnyCDN) return '🌐 CDN Configuration Change';
@@ -443,7 +455,8 @@ class IntelligentNotificationBuilder {
     context: ChangeContext,
     cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
     lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>,
-    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>
+    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>,
+    coordinatedInfo?: { isCoordinated: boolean; confidence: number; analysis: string; relatedDomains: string[] }
   ): string {
     const actions = [];
 
@@ -471,6 +484,11 @@ class IntelligentNotificationBuilder {
 
     if (context.changeType === 'complete_change') {
       actions.push('🔄 Complete IP change - verify domain ownership and DNS integrity');
+    }
+
+    if (coordinatedInfo?.isCoordinated) {
+      actions.push(`🌐 **Coordinated change detected** - ${coordinatedInfo.relatedDomains.length + 1} domains affected simultaneously`);
+      actions.push('📊 Review infrastructure-wide changes and consider longer dampening periods');
     }
 
     return actions.length > 0 ? actions.join('\n') : 'No specific actions required - monitor for additional changes';
@@ -933,9 +951,26 @@ async function shouldSendDNSChangeNotification(
     
     // Enhanced pattern detection
     const cdnInfo = IntelligentCDNDetector.detectProvider(currentIPs);
-    const lbInfo = LoadBalancerIntelligence.analyzePattern(recentIPSets);
+    let lbInfo = LoadBalancerIntelligence.analyzePattern(recentIPSets);
     const timeInfo = TemporalAnalyzer.analyzeTimePatterns(recentIPSets);
-    const context = ChangeAnalyzer.analyzeChange(previousIPs, currentIPs, ttl);
+    let context = ChangeAnalyzer.analyzeChange(previousIPs, currentIPs, ttl);
+    
+    // Cross-domain coordinated change detection (for cases with insufficient single-domain history)
+    let coordinatedInfo: { isCoordinated: boolean; confidence: number; analysis: string; relatedDomains: string[] } | undefined;
+    if (!lbInfo.isLoadBalancer && recentIPSets.length < 3) {
+      coordinatedInfo = await detectCoordinatedInfrastructureChange(env, domain, currentIPs, now);
+      if (coordinatedInfo.isCoordinated) {
+        lbInfo = {
+          isLoadBalancer: true,
+          pattern: 'round_robin',
+          confidence: coordinatedInfo.confidence,
+          analysis: coordinatedInfo.analysis
+        };
+        // Upgrade severity for coordinated changes
+        context = { ...context, severity: 'high' as const };
+        console.log(`🌐 Coordinated infrastructure change detected for ${domain}: ${coordinatedInfo.analysis}`);
+      }
+    }
     
     // Enhanced oscillation detection
     const currentIPSet = currentIPs.sort().join(',');
@@ -965,10 +1000,12 @@ async function shouldSendDNSChangeNotification(
       }
     }
     
-    // Auto-suppress very frequent changers
+    // Auto-suppress very frequent changers (enhanced with coordinated change detection)
     const recentChanges = recentIPSets.filter(set => (now - set.timestamp) < 60 * 60 * 1000); // Last hour
-    if (recentChanges.length >= 5) {
-      console.log(`🚫 Auto-suppressing ${domain}: ${recentChanges.length} changes in last hour`);
+    const suppressionThreshold = lbInfo.isLoadBalancer ? 3 : 5; // Lower threshold for detected load balancers
+    
+    if (recentChanges.length >= suppressionThreshold) {
+      console.log(`🚫 Auto-suppressing ${domain}: ${recentChanges.length} changes in last hour (threshold: ${suppressionThreshold})`);
       
       // Set a long dampening period automatically
       const autoSuppressPeriod = 4 * 60 * 60 * 1000; // 4 hours
@@ -1019,7 +1056,8 @@ async function shouldSendDNSChangeNotification(
         cdnInfo, 
         lbInfo, 
         timeInfo,
-        dampeningReason: dampeningResult.reason
+        dampeningReason: dampeningResult.reason,
+        coordinatedInfo
       }
     };
     
@@ -1048,6 +1086,77 @@ async function updateRecentIPTracking(env: Env, domain: string, currentIPs: stri
     await env.DNS_KV.put(recentIPsKey, JSON.stringify(recentIPSets), { expirationTtl: 7 * 24 * 60 * 60 }); // 7 days
   } catch (error) {
     console.error(`Error updating recent IP tracking for ${domain}:`, error);
+  }
+}
+
+// Cross-domain coordinated change detection
+async function detectCoordinatedInfrastructureChange(
+  env: Env, 
+  domain: string, 
+  currentIPs: string[], 
+  timestamp: number
+): Promise<{ isCoordinated: boolean; confidence: number; analysis: string; relatedDomains: string[] }> {
+  try {
+    const baseDomain = domain.includes('.') ? domain.split('.').slice(-2).join('.') : domain;
+    const timeWindow = 10 * 60 * 1000; // 10 minutes
+    const recentChangeThreshold = timestamp - timeWindow;
+    
+    // Track this change globally
+    const globalChangesKey = `global:dns_changes:${Math.floor(timestamp / (5 * 60 * 1000))}`; // 5-minute buckets
+    const globalChangesData = await env.DNS_KV.get(globalChangesKey);
+    const globalChanges: Array<{domain: string, ips: string[], timestamp: number}> = 
+      globalChangesData ? JSON.parse(globalChangesData) : [];
+    
+    // Add current change
+    globalChanges.push({ domain, ips: currentIPs.sort(), timestamp });
+    
+    // Store updated global changes (expire after 1 hour)
+    await env.DNS_KV.put(globalChangesKey, JSON.stringify(globalChanges), { expirationTtl: 60 * 60 });
+    
+    // Analyze recent changes for coordination patterns
+    const recentGlobalChanges = globalChanges.filter(change => change.timestamp > recentChangeThreshold);
+    const relatedDomains = recentGlobalChanges
+      .filter(change => {
+        const changeBaseDomain = change.domain.includes('.') ? 
+          change.domain.split('.').slice(-2).join('.') : change.domain;
+        return changeBaseDomain === baseDomain && change.domain !== domain;
+      })
+      .map(change => change.domain);
+    
+    if (relatedDomains.length === 0) {
+      return { isCoordinated: false, confidence: 0, analysis: 'No related domain changes', relatedDomains: [] };
+    }
+    
+    // Check for IP range overlaps (suggests same infrastructure)
+    const allRecentIPs = new Set<string>();
+    recentGlobalChanges.forEach(change => change.ips.forEach(ip => allRecentIPs.add(ip)));
+    const currentIPSet = new Set(currentIPs);
+    const ipOverlap = Array.from(allRecentIPs).filter(ip => currentIPSet.has(ip)).length;
+    const ipOverlapRatio = ipOverlap / Math.max(allRecentIPs.size, currentIPs.length);
+    
+    // Coordinated change criteria
+    const coordinationScore = Math.min(1, (relatedDomains.length * 0.3) + (ipOverlapRatio * 0.7));
+    const isCoordinated = relatedDomains.length >= 2 && coordinationScore > 0.6;
+    
+    if (isCoordinated) {
+      return {
+        isCoordinated: true,
+        confidence: coordinationScore,
+        analysis: `${relatedDomains.length + 1} related ${baseDomain} domains changed within ${Math.round(timeWindow / (60 * 1000))} minutes, ${Math.round(ipOverlapRatio * 100)}% IP overlap suggests coordinated infrastructure change`,
+        relatedDomains
+      };
+    }
+    
+    return { 
+      isCoordinated: false, 
+      confidence: coordinationScore, 
+      analysis: `${relatedDomains.length} related changes but insufficient coordination score (${Math.round(coordinationScore * 100)}%)`,
+      relatedDomains 
+    };
+    
+  } catch (error) {
+    console.error(`Error detecting coordinated changes for ${domain}:`, error);
+    return { isCoordinated: false, confidence: 0, analysis: 'Error in coordination detection', relatedDomains: [] };
   }
 }
 
@@ -1161,7 +1270,8 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
               dampeningResult.analysis.cdnInfo,
               dampeningResult.analysis.lbInfo,
               dampeningResult.analysis.timeInfo,
-              soaData
+              soaData,
+              dampeningResult.analysis.coordinatedInfo
             );
           } else {
             // Fallback to basic notification
