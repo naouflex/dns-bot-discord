@@ -94,6 +94,22 @@ interface DiscordInteractionResponse {
   };
 }
 
+// Enhanced Dampening Interfaces
+interface ChangeContext {
+  timestamp: number;
+  previousIPs: string[];
+  currentIPs: string[];
+  ttl: number;
+  changeType: 'addition' | 'removal' | 'replacement' | 'complete_change';
+  geoContext?: {
+    regions: string[];
+    previousRegions: string[];
+    crossRegion: boolean;
+  };
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  confidence: number; // 0-1 scale for pattern confidence
+}
+
 // Discord command definitions
 const DISCORD_COMMANDS = [
   {
@@ -238,7 +254,230 @@ async function sendDiscordMessage(env: Env, embed: DiscordEmbed, content?: strin
   }
 }
 
-// Helper to create colored embeds based on notification type
+// Enhanced Notification Builder
+class IntelligentNotificationBuilder {
+  static buildEnhancedNotification(
+    domain: string,
+    previousIPs: string[],
+    currentIPs: string[],
+    context: ChangeContext,
+    cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
+    lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>,
+    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>,
+    soaData?: string[]
+  ): DiscordEmbed {
+    const embed: DiscordEmbed = {
+      title: this.getSmartTitle(context, cdnInfo, lbInfo, timeInfo),
+      description: `IP addresses for \`${domain}\` have changed`,
+      color: this.getSeverityColor(context.severity),
+      fields: [
+        {
+          name: "Previous IPs",
+          value: previousIPs.join(", ") || "none",
+          inline: false
+        },
+        {
+          name: "New IPs", 
+          value: currentIPs.join(", "),
+          inline: false
+        },
+        {
+          name: "📊 Change Analysis",
+          value: this.buildAnalysisText(context, cdnInfo, lbInfo, timeInfo),
+          inline: false
+        }
+      ],
+      timestamp: new Date().toISOString(),
+      footer: {
+        text: `DNS Monitor • Confidence: ${Math.round(context.confidence * 100)}%`
+      }
+    };
+
+    // Add context-specific fields
+    if (cdnInfo.isAnyCDN) {
+      embed.fields!.push({
+        name: "🌐 CDN Information",
+        value: cdnInfo.provider ? 
+          `Provider: ${cdnInfo.provider} (${Math.round(cdnInfo.confidence * 100)}% confidence)` :
+          `Generic CDN detected (${Math.round(cdnInfo.confidence * 100)}% confidence)`,
+        inline: true
+      });
+    }
+
+    if (lbInfo.isLoadBalancer) {
+      embed.fields!.push({
+        name: "⚖️ Load Balancer Details",
+        value: `Pattern: ${lbInfo.pattern}\nAnalysis: ${lbInfo.analysis}`,
+        inline: false
+      });
+    }
+
+    // Add technical details
+    embed.fields!.push({
+      name: "🔧 Technical Details",
+      value: `TTL: ${context.ttl}s\nRecord Type: A\nChange Type: ${context.changeType.replace('_', ' ')}`,
+      inline: true
+    });
+
+    if (soaData && soaData.length >= 3) {
+      embed.fields!.push({
+        name: "📋 SOA Information",
+        value: `Serial: ${soaData[2]}\nPrimary NS: ${soaData[0] || 'unknown'}\nAdmin: ${soaData[1] || 'unknown'}`,
+        inline: true
+      });
+    }
+
+    // Add recommended actions based on context
+    embed.fields!.push({
+      name: "💡 Recommended Actions",
+      value: this.getRecommendedActions(context, cdnInfo, lbInfo, timeInfo),
+      inline: false
+    });
+
+    return embed;
+  }
+
+  static buildAutoSuppressionNotification(
+    domain: string,
+    previousIPs: string[],
+    currentIPs: string[],
+    changeCount: number,
+    cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
+    lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>
+  ): DiscordEmbed {
+    const embed: DiscordEmbed = {
+      title: '🚫 DNS Auto-Suppression Activated',
+      description: `Domain \`${domain}\` is changing too frequently - notifications suppressed for 4 hours`,
+      color: 16763904, // Yellow/Warning
+      fields: [
+        {
+          name: "🚫 Reason",
+          value: `${changeCount} IP changes detected in the last hour`,
+          inline: false
+        },
+        {
+          name: "⏰ Suppression Duration", 
+          value: "4 hours (auto-dampening)",
+          inline: true
+        },
+        {
+          name: "📋 Latest Change",
+          value: `${previousIPs.join(", ")} → ${currentIPs.join(", ")}`,
+          inline: false
+        }
+      ],
+      timestamp: new Date().toISOString(),
+      footer: {
+        text: "DNS Monitor - Auto-Suppression"
+      }
+    };
+
+    // Add pattern-specific advice
+    let actionAdvice = "Check if this domain uses load balancing or CDN";
+    if (cdnInfo.isAnyCDN && cdnInfo.provider) {
+      actionAdvice = `${cdnInfo.provider} CDN detected - consider domain-specific dampening rules`;
+    } else if (lbInfo.isLoadBalancer) {
+      actionAdvice = `${lbInfo.pattern} load balancing detected - consider increasing dampening period`;
+    }
+
+    embed.fields!.push({
+      name: "🔧 Action Needed",
+      value: actionAdvice,
+      inline: true
+    });
+
+    embed.fields!.push({
+      name: "💡 Note",
+      value: "Use `/dampening` command to check status or clear manually",
+      inline: false
+    });
+
+    return embed;
+  }
+
+  private static getSmartTitle(
+    context: ChangeContext,
+    cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
+    lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>,
+    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>
+  ): string {
+    if (context.severity === 'critical') return '🚨 Critical DNS Change Detected';
+    if (lbInfo.isLoadBalancer && lbInfo.pattern === 'failover') return '🔄 Load Balancer Failover Detected';
+    if (cdnInfo.isAnyCDN) return '🌐 CDN Configuration Change';
+    if (timeInfo.isMaintenanceWindow) return '🔧 DNS Change During Maintenance Window';
+    if (context.changeType === 'complete_change') return '⚡ Complete IP Address Change';
+    return '📡 DNS Change Detected';
+  }
+
+  private static getSeverityColor(severity: string): number {
+    switch (severity) {
+      case 'critical': return 16711680; // Red
+      case 'high': return 16753920;    // Orange 
+      case 'medium': return 16776960;  // Yellow
+      case 'low': return 5793266;      // Blue
+      default: return 9807270;         // Gray
+    }
+  }
+
+  private static buildAnalysisText(
+    context: ChangeContext,
+    cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
+    lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>,
+    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>
+  ): string {
+    const parts = [];
+    
+    parts.push(`**Change Type:** ${context.changeType.replace('_', ' ')}`);
+    parts.push(`**Severity:** ${context.severity.toUpperCase()}`);
+    parts.push(`**TTL:** ${context.ttl}s`);
+    parts.push(`**Time Context:** ${timeInfo.timePattern.replace('_', ' ')}`);
+    
+    if (context.geoContext) {
+      parts.push(`**Geographic:** ${context.geoContext.crossRegion ? 'Cross-region' : 'Same region'}`);
+    }
+    
+    return parts.join('\n');
+  }
+
+  private static getRecommendedActions(
+    context: ChangeContext,
+    cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
+    lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>,
+    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>
+  ): string {
+    const actions = [];
+
+    if (context.severity === 'critical') {
+      actions.push('🚨 **Immediate attention required** - verify service availability');
+    }
+
+    if (lbInfo.isLoadBalancer) {
+      if (lbInfo.pattern === 'failover') {
+        actions.push('🔍 Check if this is planned failover or incident response');
+      } else {
+        actions.push(`📊 Normal ${lbInfo.pattern} load balancing - consider increasing dampening`);
+      }
+    }
+
+    if (cdnInfo.isAnyCDN) {
+      actions.push('🌐 CDN change detected - verify edge server health');
+    }
+
+    if (timeInfo.isMaintenanceWindow) {
+      actions.push('🔧 Change during maintenance window - likely planned');
+    } else if (timeInfo.isBusinessHours) {
+      actions.push('⏰ Change during business hours - may need immediate attention');
+    }
+
+    if (context.changeType === 'complete_change') {
+      actions.push('🔄 Complete IP change - verify domain ownership and DNS integrity');
+    }
+
+    return actions.length > 0 ? actions.join('\n') : 'No specific actions required - monitor for additional changes';
+  }
+}
+
+// Helper to create colored embeds based on notification type (backward compatibility)
 function createEmbed(type: 'error' | 'warning' | 'change' | 'update', title: string): DiscordEmbed {
   // Discord colors (decimal values)
   const colors = {
@@ -314,64 +553,371 @@ async function queryDNS(domain: string): Promise<DNSResponse> {
   };
 }
 
-// CDN and cloud provider IP ranges for enhanced dampening
-function isCDNOrCloudIP(ips: string[]): boolean {
-  const cdnRanges = [
-    // CloudFlare
-    { start: '13.32.0.0', end: '13.35.255.255' },
-    { start: '13.224.0.0', end: '13.227.255.255' },
-    { start: '13.249.0.0', end: '13.249.255.255' },
+// Enhanced CDN and Cloud Provider Detection
+class IntelligentCDNDetector {
+  private static readonly ENHANCED_CDN_RANGES = [
+    // Cloudflare (comprehensive)
+    { provider: 'Cloudflare', start: '104.16.0.0', end: '104.31.255.255' },
+    { provider: 'Cloudflare', start: '172.64.0.0', end: '172.71.255.255' },
+    { provider: 'Cloudflare', start: '108.162.192.0', end: '108.162.255.255' },
+    { provider: 'Cloudflare', start: '190.93.240.0', end: '190.93.255.255' },
+    { provider: 'Cloudflare', start: '188.114.96.0', end: '188.114.127.255' },
     
-    // AWS CloudFront/ELB
-    { start: '3.160.0.0', end: '3.175.255.255' },
-    { start: '13.32.0.0', end: '13.35.255.255' },
-    { start: '52.84.0.0', end: '52.85.255.255' },
-    { start: '54.230.0.0', end: '54.239.255.255' },
+    // AWS CloudFront/ALB/ELB (expanded)
+    { provider: 'AWS', start: '13.32.0.0', end: '13.35.255.255' },
+    { provider: 'AWS', start: '13.224.0.0', end: '13.227.255.255' },
+    { provider: 'AWS', start: '13.249.0.0', end: '13.249.255.255' },
+    { provider: 'AWS', start: '52.84.0.0', end: '52.85.255.255' },
+    { provider: 'AWS', start: '54.230.0.0', end: '54.239.255.255' },
+    { provider: 'AWS', start: '204.246.164.0', end: '204.246.191.255' },
+    { provider: 'AWS', start: '205.251.192.0', end: '205.251.255.255' },
     
     // Fastly
-    { start: '23.235.32.0', end: '23.235.63.255' },
-    { start: '151.101.0.0', end: '151.101.255.255' },
+    { provider: 'Fastly', start: '23.235.32.0', end: '23.235.63.255' },
+    { provider: 'Fastly', start: '151.101.0.0', end: '151.101.255.255' },
+    { provider: 'Fastly', start: '199.232.0.0', end: '199.232.255.255' },
     
-    // Generic load balancer patterns
-    { start: '172.64.0.0', end: '172.71.255.255' }, // CloudFlare
-    { start: '104.16.0.0', end: '104.31.255.255' }, // CloudFlare
+    // Google Cloud CDN/Load Balancer
+    { provider: 'Google', start: '35.186.0.0', end: '35.191.255.255' },
+    { provider: 'Google', start: '130.211.0.0', end: '130.211.255.255' },
+    { provider: 'Google', start: '35.244.0.0', end: '35.247.255.255' },
+    
+    // Azure Front Door/Traffic Manager
+    { provider: 'Azure', start: '40.90.0.0', end: '40.91.255.255' },
+    { provider: 'Azure', start: '13.107.42.0', end: '13.107.43.255' },
+    { provider: 'Azure', start: '204.79.197.0', end: '204.79.197.255' },
+    
+    // KeyCDN
+    { provider: 'KeyCDN', start: '119.81.0.0', end: '119.81.255.255' },
+    
+    // MaxCDN/StackPath
+    { provider: 'StackPath', start: '94.31.0.0', end: '94.31.255.255' },
+    
+    // Incapsula/Imperva
+    { provider: 'Imperva', start: '149.126.72.0', end: '149.126.79.255' },
+    { provider: 'Imperva', start: '185.11.124.0', end: '185.11.127.255' },
   ];
-  
-  for (const ip of ips) {
-    const ipNum = ipToNumber(ip);
-    for (const range of cdnRanges) {
-      if (ipNum >= ipToNumber(range.start) && ipNum <= ipToNumber(range.end)) {
-        return true;
+
+  static detectProvider(ips: string[]): { provider: string | null; confidence: number; isAnyCDN: boolean } {
+    let matches = 0;
+    let totalIPs = ips.length;
+    let detectedProvider: string | null = null;
+    
+    for (const ip of ips) {
+      const ipNum = this.ipToNumber(ip);
+      for (const range of this.ENHANCED_CDN_RANGES) {
+        if (ipNum >= this.ipToNumber(range.start) && ipNum <= this.ipToNumber(range.end)) {
+          matches++;
+          if (!detectedProvider) detectedProvider = range.provider;
+          break;
+        }
       }
     }
+    
+    const confidence = totalIPs > 0 ? matches / totalIPs : 0;
+    return {
+      provider: confidence > 0.5 ? detectedProvider : null,
+      confidence,
+      isAnyCDN: confidence > 0
+    };
   }
-  return false;
+
+  private static ipToNumber(ip: string): number {
+    return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+  }
+}
+
+// Backward compatibility function
+function isCDNOrCloudIP(ips: string[]): boolean {
+  return IntelligentCDNDetector.detectProvider(ips).isAnyCDN;
 }
 
 function ipToNumber(ip: string): number {
-  return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+  return IntelligentCDNDetector['ipToNumber'](ip);
 }
 
-function detectLoadBalancerPattern(domain: string, recentIPSets: Array<{ips: string[], timestamp: number}>): boolean {
-  // Detect if domain frequently switches between different IP sets (load balancer behavior)
-  if (recentIPSets.length < 3) return false;
-  
-  // Check for alternating patterns in the last hour
-  const oneHourAgo = Date.now() - 60 * 60 * 1000;
-  const recentSets = recentIPSets.filter(set => set.timestamp > oneHourAgo);
-  
-  if (recentSets.length >= 3) {
-    const uniqueIPSets = new Set(recentSets.map(set => set.ips.sort().join(',')));
-    // If we have 3+ changes but only 2-3 unique IP sets, it's likely load balancer oscillation
-    if (recentSets.length >= 3 && uniqueIPSets.size <= 3) {
-      return true;
+// Advanced Load Balancer Pattern Detection
+class LoadBalancerIntelligence {
+  static analyzePattern(recentIPSets: Array<{ips: string[], timestamp: number}>): {
+    isLoadBalancer: boolean;
+    pattern: 'round_robin' | 'weighted' | 'failover' | 'geographic' | 'unknown';
+    confidence: number;
+    analysis: string;
+  } {
+    if (recentIPSets.length < 3) {
+      return { isLoadBalancer: false, pattern: 'unknown', confidence: 0, analysis: 'Insufficient data' };
     }
+    
+    const now = Date.now();
+    const oneHour = 60 * 60 * 1000;
+    const recentSets = recentIPSets.filter(set => (now - set.timestamp) < oneHour);
+    
+    if (recentSets.length < 3) {
+      return { isLoadBalancer: false, pattern: 'unknown', confidence: 0, analysis: 'Not enough recent changes' };
+    }
+    
+    // Analyze patterns
+    const uniqueIPSets = new Set(recentSets.map(set => set.ips.sort().join(',')));
+    const uniqueCount = uniqueIPSets.size;
+    const totalChanges = recentSets.length;
+    
+    // Round-robin pattern: Limited set of IPs rotating frequently
+    if (totalChanges >= 5 && uniqueCount <= 3 && uniqueCount >= 2) {
+      return {
+        isLoadBalancer: true,
+        pattern: 'round_robin',
+        confidence: 0.8,
+        analysis: `${totalChanges} changes between ${uniqueCount} IP sets suggests round-robin load balancing`
+      };
+    }
+    
+    // Weighted pattern: Some IPs appear more frequently
+    if (uniqueCount >= 2 && uniqueCount <= 4) {
+      const ipFrequency = new Map<string, number>();
+      recentSets.forEach(set => {
+        const key = set.ips.sort().join(',');
+        ipFrequency.set(key, (ipFrequency.get(key) || 0) + 1);
+      });
+      
+      const frequencies = Array.from(ipFrequency.values()).sort((a, b) => b - a);
+      if (frequencies[0] > frequencies[1] * 1.5) {
+        return {
+          isLoadBalancer: true,
+          pattern: 'weighted',
+          confidence: 0.7,
+          analysis: `Weighted distribution detected: primary IP set appears ${frequencies[0]} times vs ${frequencies[1]}`
+        };
+      }
+    }
+    
+    // Failover pattern: Sudden switch from one IP to another
+    if (recentSets.length >= 2) {
+      const timeGaps = [];
+      for (let i = 1; i < recentSets.length; i++) {
+        timeGaps.push(recentSets[i].timestamp - recentSets[i-1].timestamp);
+      }
+      
+      const avgGap = timeGaps.reduce((a, b) => a + b, 0) / timeGaps.length;
+      const hasLargeGap = timeGaps.some(gap => gap > avgGap * 3);
+      
+      if (hasLargeGap && uniqueCount <= 2) {
+        return {
+          isLoadBalancer: true,
+          pattern: 'failover',
+          confidence: 0.6,
+          analysis: 'Failover pattern: sudden switches with time gaps suggest failover behavior'
+        };
+      }
+    }
+    
+    return { isLoadBalancer: false, pattern: 'unknown', confidence: 0, analysis: 'No clear load balancer pattern detected' };
   }
-  
-  return false;
 }
 
-async function shouldSendDNSChangeNotification(env: Env, domain: string, currentIPs: string[], ttl: number): Promise<boolean> {
+// Backward compatibility function
+function detectLoadBalancerPattern(domain: string, recentIPSets: Array<{ips: string[], timestamp: number}>): boolean {
+  return LoadBalancerIntelligence.analyzePattern(recentIPSets).isLoadBalancer;
+}
+
+// Time-based Intelligence
+class TemporalAnalyzer {
+  static analyzeTimePatterns(recentIPSets: Array<{ips: string[], timestamp: number}>): {
+    isMaintenanceWindow: boolean;
+    isBusinessHours: boolean;
+    isWeekend: boolean;
+    timePattern: string;
+  } {
+    const now = new Date();
+    const currentHour = now.getUTCHours();
+    const isWeekend = now.getUTCDay() === 0 || now.getUTCDay() === 6;
+    
+    // Common maintenance windows: 2-6 AM UTC, 10 PM - 2 AM UTC
+    const isMaintenanceWindow = (currentHour >= 2 && currentHour <= 6) || 
+                               (currentHour >= 22 || currentHour <= 2);
+    
+    // Business hours: 8 AM - 6 PM UTC (rough global business hours)
+    const isBusinessHours = currentHour >= 8 && currentHour <= 18 && !isWeekend;
+    
+    let timePattern = 'normal';
+    if (isMaintenanceWindow) timePattern = 'maintenance_window';
+    else if (!isBusinessHours) timePattern = 'off_hours';
+    else if (isWeekend) timePattern = 'weekend';
+    
+    return {
+      isMaintenanceWindow,
+      isBusinessHours,
+      isWeekend,
+      timePattern
+    };
+  }
+}
+
+// Change Analysis Helper
+class ChangeAnalyzer {
+  static analyzeChange(previousIPs: string[], currentIPs: string[], ttl: number): ChangeContext {
+    const now = Date.now();
+    let changeType: ChangeContext['changeType'] = 'replacement';
+    let severity: ChangeContext['severity'] = 'medium';
+    
+    // Determine change type
+    if (previousIPs.length === 0) {
+      changeType = 'addition';
+    } else if (currentIPs.length === 0) {
+      changeType = 'removal';
+      severity = 'high'; // IP removal is usually significant
+    } else if (previousIPs.length !== currentIPs.length || 
+               !previousIPs.every(ip => currentIPs.includes(ip))) {
+      if (previousIPs.every(ip => !currentIPs.includes(ip))) {
+        changeType = 'complete_change';
+        severity = 'high'; // Complete IP change is significant
+      } else {
+        changeType = 'replacement';
+      }
+    }
+    
+    // Determine severity based on change characteristics
+    const timeInfo = TemporalAnalyzer.analyzeTimePatterns([]);
+    if (changeType === 'complete_change' && timeInfo.isBusinessHours) {
+      severity = 'critical';
+    } else if (changeType === 'removal') {
+      severity = 'high';
+    } else if (timeInfo.isMaintenanceWindow) {
+      severity = 'low';
+    }
+    
+    return {
+      timestamp: now,
+      previousIPs,
+      currentIPs,
+      ttl,
+      changeType,
+      severity,
+      confidence: 0.8 // Default confidence, can be adjusted by pattern detection
+    };
+  }
+}
+
+// Enhanced Dampening Calculator
+class EnhancedDampeningCalculator {
+  static calculateIntelligentDampening(
+    domain: string,
+    context: ChangeContext,
+    cdnInfo: ReturnType<typeof IntelligentCDNDetector.detectProvider>,
+    lbInfo: ReturnType<typeof LoadBalancerIntelligence.analyzePattern>,
+    timeInfo: ReturnType<typeof TemporalAnalyzer.analyzeTimePatterns>,
+    recentIPSets: Array<{ips: string[], timestamp: number}>
+  ): {
+    dampeningPeriod: number;
+    reason: string;
+    shouldNotify: boolean;
+    nextNotificationTime: number;
+  } {
+    let baseDampening = this.getBaseDampening(context.ttl);
+    let multiplier = 1;
+    const reasons = [];
+
+    // CDN adjustments
+    if (cdnInfo.isAnyCDN) {
+      if (cdnInfo.confidence > 0.8) {
+        multiplier *= 2; // Strong CDN confidence = more dampening
+        reasons.push(`CDN detected (${cdnInfo.provider || 'generic'})`);
+      } else {
+        multiplier *= 1.5;
+        reasons.push('Possible CDN detected');
+      }
+    }
+
+    // Load balancer adjustments
+    if (lbInfo.isLoadBalancer) {
+      switch (lbInfo.pattern) {
+        case 'round_robin':
+          multiplier *= 3; // Very aggressive dampening
+          reasons.push('Round-robin load balancing');
+          break;
+        case 'weighted':
+          multiplier *= 2;
+          reasons.push('Weighted load balancing');
+          break;
+        case 'failover':
+          multiplier *= 0.5; // Less dampening for failovers (more important)
+          reasons.push('Failover detected - reduced dampening');
+          break;
+        default:
+          multiplier *= 1.5;
+          reasons.push('Load balancer pattern detected');
+      }
+    }
+
+    // Time-based adjustments
+    if (timeInfo.isMaintenanceWindow) {
+      multiplier *= 1.5;
+      reasons.push('Maintenance window');
+    } else if (timeInfo.isBusinessHours) {
+      multiplier *= 0.8; // Less dampening during business hours
+      reasons.push('Business hours - priority notifications');
+    }
+
+    // Severity adjustments
+    switch (context.severity) {
+      case 'critical':
+        multiplier *= 0.3; // Minimal dampening for critical changes
+        reasons.push('Critical severity');
+        break;
+      case 'high':
+        multiplier *= 0.6;
+        reasons.push('High severity');
+        break;
+      case 'medium':
+        multiplier *= 1;
+        break;
+      case 'low':
+        multiplier *= 2;
+        reasons.push('Low severity');
+        break;
+    }
+
+    // Frequency-based adjustments
+    const recentChanges = recentIPSets.filter(set => 
+      (Date.now() - set.timestamp) < 60 * 60 * 1000 // Last hour
+    );
+    
+    if (recentChanges.length >= 5) {
+      multiplier *= 4; // Heavy dampening for very frequent changes
+      reasons.push('High frequency changes');
+    } else if (recentChanges.length >= 3) {
+      multiplier *= 2;
+      reasons.push('Moderate frequency changes');
+    }
+
+    const finalDampening = Math.round(baseDampening * multiplier);
+    const maxDampening = 4 * 60 * 60 * 1000; // 4 hours max
+    const minDampening = 1 * 60 * 1000; // 1 minute min for critical
+
+    const clampedDampening = Math.min(Math.max(finalDampening, minDampening), maxDampening);
+
+    return {
+      dampeningPeriod: clampedDampening,
+      reason: reasons.join(', '),
+      shouldNotify: true, // Logic would check against last notification time
+      nextNotificationTime: Date.now() + clampedDampening
+    };
+  }
+
+  private static getBaseDampening(ttl: number): number {
+    if (ttl < 60) return 20 * 60 * 1000; // 20 minutes
+    if (ttl < 300) return 15 * 60 * 1000; // 15 minutes  
+    if (ttl < 900) return Math.max(ttl * 2 * 1000, 5 * 60 * 1000); // 2x TTL or 5 min
+    return Math.max(ttl * 1000, 5 * 60 * 1000); // 1x TTL or 5 min
+  }
+}
+
+async function shouldSendDNSChangeNotification(
+  env: Env, 
+  domain: string, 
+  currentIPs: string[], 
+  ttl: number,
+  previousIPs: string[] = []
+): Promise<{ shouldNotify: boolean; context?: ChangeContext; analysis?: any }> {
   try {
     const now = Date.now();
     
@@ -386,45 +932,10 @@ async function shouldSendDNSChangeNotification(env: Env, domain: string, current
     const recentIPSets: Array<{ips: string[], timestamp: number}> = recentIPsData ? JSON.parse(recentIPsData) : [];
     
     // Enhanced pattern detection
-    const isCDN = isCDNOrCloudIP(currentIPs);
-    const isLoadBalancer = detectLoadBalancerPattern(domain, recentIPSets);
-    const hasVeryLowTTL = ttl <= 60;
-    
-    // Calculate dampening period with enhanced logic
-    let dampeningPeriod: number;
-    
-    if (isCDN && hasVeryLowTTL) {
-      // CDN with very low TTL: Very aggressive dampening
-      dampeningPeriod = 60 * 60 * 1000; // 1 hour
-      console.log(`🌐 CDN with low TTL detected: ${domain} - applying 1 hour dampening`);
-    } else if (isLoadBalancer) {
-      // Load balancer pattern: Aggressive dampening  
-      dampeningPeriod = 45 * 60 * 1000; // 45 minutes
-      console.log(`⚖️ Load balancer pattern detected: ${domain} - applying 45 min dampening`);
-    } else if (hasVeryLowTTL && recentIPSets.length > 2) {
-      // Low TTL with frequent changes: High dampening
-      dampeningPeriod = 30 * 60 * 1000; // 30 minutes
-      console.log(`⚡ High frequency changes detected: ${domain} - applying 30 min dampening`);
-    } else if (ttl < 60) {
-      dampeningPeriod = 20 * 60 * 1000; // 20 minutes for very short TTL (increased from 10)
-    } else if (ttl < 300) {
-      dampeningPeriod = 15 * 60 * 1000; // 15 minutes for short TTL (increased from 5)
-    } else if (ttl < 900) {
-      dampeningPeriod = Math.max(ttl * 2 * 1000, 5 * 60 * 1000); // 2x TTL or 5 minutes minimum
-    } else {
-      dampeningPeriod = Math.max(ttl * 1000, 5 * 60 * 1000); // 1x TTL or 5 minutes minimum
-    }
-    
-    // Check if enough time has passed since last notification
-    const timeSinceLastNotify = now - lastNotifyTime;
-    if (timeSinceLastNotify < dampeningPeriod) {
-      const remaining = Math.round((dampeningPeriod - timeSinceLastNotify) / (60 * 1000));
-      console.log(`🔇 Dampening active for ${domain}: ${remaining} minutes remaining`);
-      
-      // Still update recent IPs tracking without notifying
-      await updateRecentIPTracking(env, domain, currentIPs, now);
-      return false;
-    }
+    const cdnInfo = IntelligentCDNDetector.detectProvider(currentIPs);
+    const lbInfo = LoadBalancerIntelligence.analyzePattern(recentIPSets);
+    const timeInfo = TemporalAnalyzer.analyzeTimePatterns(recentIPSets);
+    const context = ChangeAnalyzer.analyzeChange(previousIPs, currentIPs, ttl);
     
     // Enhanced oscillation detection
     const currentIPSet = currentIPs.sort().join(',');
@@ -439,17 +950,18 @@ async function shouldSendDNSChangeNotification(env: Env, domain: string, current
       
       // For oscillating IPs, use much longer dampening period
       let oscillationDampening;
-      if (isCDN || isLoadBalancer) {
+      if (cdnInfo.isAnyCDN || lbInfo.isLoadBalancer) {
         oscillationDampening = 2 * 60 * 60 * 1000; // 2 hours for CDN/LB oscillation
       } else {
-        oscillationDampening = Math.max(dampeningPeriod * 3, 30 * 60 * 1000); // 3x normal or 30 minutes
+        oscillationDampening = 30 * 60 * 1000; // 30 minutes for others
       }
       
+      const timeSinceLastNotify = now - lastNotifyTime;
       if (timeSinceLastNotify < oscillationDampening) {
         const remainingOsc = Math.round((oscillationDampening - timeSinceLastNotify) / (60 * 1000));
         console.log(`🔇 Oscillation dampening for ${domain}: ${remainingOsc} minutes remaining`);
         await updateRecentIPTracking(env, domain, currentIPs, now);
-        return false;
+        return { shouldNotify: false };
       }
     }
     
@@ -465,20 +977,56 @@ async function shouldSendDNSChangeNotification(env: Env, domain: string, current
       
       // Send one final notification about auto-suppression
       console.log(`📢 Sending auto-suppression notice for ${domain}`);
-      return true; // This will be the last notification for a while
+      return { 
+        shouldNotify: true, 
+        context: { ...context, severity: 'high' as const, changeType: 'complete_change' as const },
+        analysis: { 
+          isAutoSuppression: true, 
+          changeCount: recentChanges.length,
+          cdnInfo, 
+          lbInfo, 
+          timeInfo 
+        }
+      };
+    }
+    
+    // Calculate intelligent dampening
+    const dampeningResult = EnhancedDampeningCalculator.calculateIntelligentDampening(
+      domain, context, cdnInfo, lbInfo, timeInfo, recentIPSets
+    );
+    
+    // Check if enough time has passed since last notification
+    const timeSinceLastNotify = now - lastNotifyTime;
+    if (timeSinceLastNotify < dampeningResult.dampeningPeriod) {
+      const remaining = Math.round((dampeningResult.dampeningPeriod - timeSinceLastNotify) / (60 * 1000));
+      console.log(`🔇 Intelligent dampening active for ${domain}: ${remaining} minutes remaining (${dampeningResult.reason})`);
+      
+      // Still update recent IPs tracking without notifying
+      await updateRecentIPTracking(env, domain, currentIPs, now);
+      return { shouldNotify: false };
     }
     
     // Should send notification - update tracking
     await env.DNS_KV.put(lastNotificationKey, now.toString(), { expirationTtl: 7 * 24 * 60 * 60 }); // 7 days
     await updateRecentIPTracking(env, domain, currentIPs, now);
     
-    console.log(`✅ Sending DNS change notification for ${domain} (dampening: ${Math.round(dampeningPeriod/60000)} min)`);
-    return true;
+    console.log(`✅ Sending intelligent DNS change notification for ${domain} (${dampeningResult.reason})`);
+    return { 
+      shouldNotify: true, 
+      context,
+      analysis: { 
+        isAutoSuppression: false,
+        cdnInfo, 
+        lbInfo, 
+        timeInfo,
+        dampeningReason: dampeningResult.reason
+      }
+    };
     
   } catch (error) {
-    console.error(`Error in dampening logic for ${domain}:`, error);
+    console.error(`Error in enhanced dampening logic for ${domain}:`, error);
     // On error, err on the side of sending notifications
-    return true;
+    return { shouldNotify: true };
   }
 }
 
@@ -503,41 +1051,7 @@ async function updateRecentIPTracking(env: Env, domain: string, currentIPs: stri
   }
 }
 
-async function sendAutoSuppressionNotification(env: Env, domain: string, previousIPs: string[], currentIPs: string[], changeCount: number): Promise<void> {
-  const embed = createEmbed('warning', 'DNS Auto-Suppression Activated');
-  embed.description = `Domain \`${domain}\` is changing too frequently - notifications suppressed for 4 hours`;
-  embed.fields = [
-    {
-      name: "🚫 Reason",
-      value: `${changeCount} IP changes detected in the last hour`,
-      inline: false
-    },
-    {
-      name: "⏰ Suppression Duration", 
-      value: "4 hours (auto-dampening)",
-      inline: true
-    },
-    {
-      name: "🔧 Action Needed",
-      value: "Check if this domain uses load balancing or CDN",
-      inline: true
-    },
-    {
-      name: "📋 Latest Change",
-      value: `${previousIPs.join(", ")} → ${currentIPs.join(", ")}`,
-      inline: false
-    },
-    {
-      name: "💡 Note",
-      value: "Use `/dampening` command to check status or clear manually",
-      inline: false
-    }
-  ];
-
-  // Only add role mention if DISCORD_ROLE_ID is set
-  const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : ``;
-  await sendDiscordMessage(env, embed, mentionContent);
-}
+// Note: sendAutoSuppressionNotification function replaced by IntelligentNotificationBuilder.buildAutoSuppressionNotification
 
 async function checkDomain(domain: string, env: Env): Promise<void> {
   try {
@@ -621,22 +1135,37 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
         console.log(`SOA Serial: ${serial}`);
         console.log(`Timestamp: ${new Date().toISOString()}`);
       } else {
-        // Check if we should send a notification (dampening logic)
-        const shouldNotify = await shouldSendDNSChangeNotification(env, domain, currentIPs, ttl);
+        // Check if we should send a notification using enhanced dampening logic
+        const dampeningResult = await shouldSendDNSChangeNotification(env, domain, currentIPs, ttl, previousIPsArray);
         
-        if (shouldNotify) {
-          // Check if this is an auto-suppression notification
-          const recentIPsKey = `notify:${domain}:recent_ips`;
-          const recentIPsData = await env.DNS_KV.get(recentIPsKey);
-          const recentIPSets: Array<{ips: string[], timestamp: number}> = recentIPsData ? JSON.parse(recentIPsData) : [];
-          const recentChanges = recentIPSets.filter(set => (Date.now() - set.timestamp) < 60 * 60 * 1000);
+        if (dampeningResult.shouldNotify) {
+          let embed: DiscordEmbed;
           
-          if (recentChanges.length >= 5) {
+          if (dampeningResult.analysis?.isAutoSuppression) {
             // This is the auto-suppression notification
-            await sendAutoSuppressionNotification(env, domain, previousIPsArray, currentIPs, recentChanges.length);
+            embed = IntelligentNotificationBuilder.buildAutoSuppressionNotification(
+              domain, 
+              previousIPsArray, 
+              currentIPs, 
+              dampeningResult.analysis.changeCount,
+              dampeningResult.analysis.cdnInfo,
+              dampeningResult.analysis.lbInfo
+            );
+          } else if (dampeningResult.context && dampeningResult.analysis) {
+            // Enhanced intelligent notification
+            embed = IntelligentNotificationBuilder.buildEnhancedNotification(
+              domain,
+              previousIPsArray,
+              currentIPs,
+              dampeningResult.context,
+              dampeningResult.analysis.cdnInfo,
+              dampeningResult.analysis.lbInfo,
+              dampeningResult.analysis.timeInfo,
+              soaData
+            );
           } else {
-            // Normal DNS change notification
-            const embed = createEmbed('change', 'DNS Change Detected');
+            // Fallback to basic notification
+            embed = createEmbed('change', 'DNS Change Detected');
             embed.description = `IP addresses for \`${domain}\` have changed`;
             embed.fields = [
               {
@@ -660,41 +1189,28 @@ async function checkDomain(domain: string, env: Env): Promise<void> {
                 inline: true
               },
               {
-                name: "Record Type",
-                value: "A",
-                inline: true
-              },
-              {
                 name: "SOA Serial",
                 value: serial,
                 inline: true
-              },
-              {
-                name: "Primary NS",
-                value: soaData[0] || "unknown",
-                inline: true
-              },
-              {
-                name: "Admin Email",
-                value: soaData[1] || "unknown",
-                inline: true
               }
             ];
-
-            // Only add role mention if DISCORD_ROLE_ID is set
-            const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : ``;
-            await sendDiscordMessage(env, embed, mentionContent);
           }
+
+          // Only add role mention if DISCORD_ROLE_ID is set
+          const mentionContent = env.DISCORD_ROLE_ID ? `<@&${env.DISCORD_ROLE_ID}>` : ``;
+          await sendDiscordMessage(env, embed, mentionContent);
           
-          console.log(`DNS change detected for ${domain}:`);
+          console.log(`✅ Enhanced DNS change notification sent for ${domain}:`);
           console.log(`Previous IPs: ${previousIPs || "none"}`);
           console.log(`New IPs: ${currentIPs.join(", ")}`);
           console.log(`SOA Serial: ${serial}`);
+          console.log(`Severity: ${dampeningResult.context?.severity || 'unknown'}`);
           console.log(`Timestamp: ${new Date().toISOString()}`);
         } else {
-          console.log(`🔇 DNS change detected for ${domain} but notification dampened (TTL: ${ttl}s)`);
+          console.log(`🔇 DNS change detected for ${domain} but notification intelligently dampened`);
           console.log(`Previous IPs: ${previousIPs || "none"}`);
           console.log(`New IPs: ${currentIPs.join(", ")}`);
+          console.log(`Reason: Enhanced pattern detection and context analysis`);
         }
       }
     } else if (serial !== previousSerial) {
@@ -2284,9 +2800,9 @@ async function handleDampening(interaction: DiscordInteraction, env: Env): Promi
       };
     }
     
-    // Show dampening status
-    const embed = createEmbed('update', 'DNS Change Dampening Status');
-    embed.description = `Dampening information for \`${domain}\``;
+    // Enhanced dampening status with intelligent analysis
+    const embed = createEmbed('update', 'Enhanced DNS Dampening Status');
+    embed.description = `Intelligent dampening analysis for \`${domain}\``;
     
     const fields = [];
     
@@ -2308,9 +2824,14 @@ async function handleDampening(interaction: DiscordInteraction, env: Env): Promi
     }
     
     if (recentIPSets.length > 0) {
+      // Enhanced pattern analysis
+      const cdnInfo = IntelligentCDNDetector.detectProvider(recentIPSets[recentIPSets.length - 1]?.ips || []);
+      const lbInfo = LoadBalancerIntelligence.analyzePattern(recentIPSets);
+      const timeInfo = TemporalAnalyzer.analyzeTimePatterns(recentIPSets);
+      
       fields.push({
-        name: "Recent IP Sets",
-        value: `${recentIPSets.length} sets tracked`,
+        name: "Recent Activity",
+        value: `${recentIPSets.length} IP sets tracked`,
         inline: true
       });
       
@@ -2329,28 +2850,54 @@ async function handleDampening(interaction: DiscordInteraction, env: Env): Promi
         inline: false
       });
       
-      // Check for oscillation
+      // Enhanced pattern detection results
+      if (cdnInfo.isAnyCDN) {
+        fields.push({
+          name: "🌐 CDN Detection",
+          value: cdnInfo.provider ? 
+            `${cdnInfo.provider} (${Math.round(cdnInfo.confidence * 100)}% confidence)` :
+            `Generic CDN (${Math.round(cdnInfo.confidence * 100)}% confidence)`,
+          inline: true
+        });
+      }
+      
+      if (lbInfo.isLoadBalancer) {
+        fields.push({
+          name: "⚖️ Load Balancer Pattern",
+          value: `${lbInfo.pattern} (${Math.round(lbInfo.confidence * 100)}% confidence)\n${lbInfo.analysis}`,
+          inline: false
+        });
+      }
+      
+      fields.push({
+        name: "⏰ Time Analysis",
+        value: `Pattern: ${timeInfo.timePattern.replace('_', ' ')}\nMaintenance Window: ${timeInfo.isMaintenanceWindow ? 'Yes' : 'No'}\nBusiness Hours: ${timeInfo.isBusinessHours ? 'Yes' : 'No'}`,
+        inline: true
+      });
+      
+      // Check for oscillation with enhanced detection
       if (recentIPSets.length > 1) {
         const uniqueIPSets = new Set(recentIPSets.map(set => set.ips.sort().join(',')));
         if (uniqueIPSets.size < recentIPSets.length) {
           fields.push({
-            name: "⚠️ Oscillation Detected",
-            value: `Domain switching between ${uniqueIPSets.size} different IP sets`,
+            name: "🔄 Oscillation Analysis",
+            value: `Switching between ${uniqueIPSets.size} IP sets\nPattern: ${lbInfo.isLoadBalancer ? lbInfo.pattern : 'Unknown'}\nFrequency: ${recentIPSets.length} changes tracked`,
             inline: false
           });
         }
       }
+      
     } else {
       fields.push({
-        name: "Recent IP Sets",
-        value: "None tracked",
+        name: "Recent Activity",
+        value: "No recent changes tracked",
         inline: true
       });
     }
     
     fields.push({
-      name: "Actions",
-      value: "Use `/dampening domain clear:true` to reset dampening",
+      name: "💡 Actions",
+      value: "• Use `/dampening domain clear:true` to reset dampening\n• Check `/status domain` for current DNS state\n• Review patterns above for optimization opportunities",
       inline: false
     });
     
