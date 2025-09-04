@@ -236,7 +236,6 @@ class DomainListPaginator(discord.ui.View):
         for domain in page_domains:
             ip_count = len(domain.get('current_ips', []))
             known_count = domain.get('known_addresses_count', 0)
-            coverage = f"{(known_count/ip_count*100) if ip_count > 0 else 0:.0f}%"
             
             # Add status indicators
             if ip_count == 0:
@@ -248,7 +247,7 @@ class DomainListPaginator(discord.ui.View):
             else:
                 status = "⚪"  # No known addresses
             
-            domain_list.append(f"{status} `{domain['domain']}` ({ip_count} IPs, {known_count} known, {coverage})")
+            domain_list.append(f"{status} `{domain['domain']}` ({ip_count} IPs, {known_count} known)")
         
         embed.add_field(
             name=f"Domains {self.current_page * self.domains_per_page + 1}-{min((self.current_page + 1) * self.domains_per_page, len(self.domains))}",
