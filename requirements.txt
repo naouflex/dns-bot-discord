@@ -1,0 +1,26 @@
+# Core dependencies
+asyncpg==0.29.0
+discord.py==2.3.2
+pydantic==2.5.2
+pydantic-settings==2.1.0
+
+# DNS resolution
+aiohttp==3.9.1
+aiodns==3.1.1
+
+# Database and async support
+asyncio-mqtt==0.16.1
+python-dotenv==1.0.0
+
+# Scheduling
+APScheduler==3.10.4
+
+# Logging and utilities
+structlog==23.2.0
+python-json-logger==2.0.7
+
+# Development dependencies (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.11.0
+flake8==6.1.0

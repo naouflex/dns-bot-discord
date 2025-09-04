@@ -1,11 +1,12 @@
 {
-  "domains": [
-    "inverse.finance",
-    "curve.finance",
-    "inverse.watch"
-  ],
-  "cron": "* * * * *",
-  "kvNamespace": {
-    "id": "9c9e35db9cdf483784ccdadd5bdd24a7"
+    "domains": [
+      "inverse.finance",
+      "curve.finance",
+      "inverse.watch"
+    ],
+    "cron": "* * * * *",
+    "kvNamespace": {
+      "id": "9c9e35db9cdf483784ccdadd5bdd24a7"
+    }
   }
-}
+  
