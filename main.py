@@ -30,9 +30,9 @@ def setup_logging():
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     
     # Set up file handler
-    file_handler = logging.FileHandler(logs_dir / "dns_monitor.log")
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(logging.Formatter(log_format))
+    #file_handler = logging.FileHandler(logs_dir / "dns_monitor.log")
+    #file_handler.setLevel(log_level)
+    #file_handler.setFormatter(logging.Formatter(log_format))
     
     # Set up console handler
     console_handler = logging.StreamHandler()
@@ -42,7 +42,7 @@ def setup_logging():
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    root_logger.addHandler(file_handler)
+    #root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
     
     # Reduce discord.py logging noise
