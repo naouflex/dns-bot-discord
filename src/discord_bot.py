@@ -1763,15 +1763,28 @@ async def send_webhook_notification(embed: discord.Embed, content: str = None):
 async def notify_dns_change_with_voting(domain: str, unknown_ips: List[str],
                                       change_info: Dict[str, Any], all_ips: List[str]):
     """Send DNS change notification that requires voting."""
-    # Find the first available text channel where bot can send messages
+    # Use configured channel ID if available, otherwise find first available channel
     channel = None
-    for guild in bot.guilds:
-        for ch in guild.text_channels:
-            if ch.permissions_for(guild.me).send_messages:
-                channel = ch
+    
+    if settings.discord_channel_id:
+        # Try to get the specific channel by ID
+        try:
+            channel = bot.get_channel(int(settings.discord_channel_id))
+            if channel and not channel.permissions_for(channel.guild.me).send_messages:
+                logger.warning(f"Bot doesn't have permission to send messages in configured channel {settings.discord_channel_id}")
+                channel = None
+        except (ValueError, AttributeError) as e:
+            logger.error(f"Invalid channel ID configured: {settings.discord_channel_id} - {e}")
+    
+    # Fallback to finding any available channel if no specific channel configured or channel not found
+    if not channel:
+        for guild in bot.guilds:
+            for ch in guild.text_channels:
+                if ch.permissions_for(guild.me).send_messages:
+                    channel = ch
+                    break
+            if channel:
                 break
-        if channel:
-            break
     
     if not channel:
         logger.error("No suitable channel found for voting notification")

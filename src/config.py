@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     discord_webhook_url: str = Field(..., description="Discord webhook URL for notifications", alias="DISCORD_WEBHOOK_URL")
     discord_role_id: Optional[str] = Field(None, description="Discord role ID to mention in alerts", alias="DISCORD_ROLE_ID")
     discord_guild_id: Optional[str] = Field(None, description="Discord guild ID for reference (commands are synced globally)", alias="DISCORD_GUILD_ID")
+    discord_channel_id: Optional[str] = Field(None, description="Discord channel ID for sending notifications", alias="DISCORD_CHANNEL_ID")
     
     # DNS Configuration
     dns_resolvers: str = Field(
