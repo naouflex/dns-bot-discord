@@ -5,6 +5,8 @@ import logging
 import signal
 import sys
 from pathlib import Path
+from datetime import datetime
+from aiohttp import web
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -52,6 +54,48 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 
+class HealthCheckServer:
+    """Simple HTTP server for health checks."""
+    
+    def __init__(self, port=8080):
+        self.port = port
+        self.app = web.Application()
+        self.runner = None
+        self.site = None
+        self.logger = logging.getLogger(__name__)
+        self._setup_routes()
+    
+    def _setup_routes(self):
+        """Set up health check routes."""
+        self.app.router.add_get('/health', self._health_check)
+        self.app.router.add_get('/ready', self._readiness_check)
+    
+    async def _health_check(self, request):
+        """Basic health check endpoint."""
+        return web.json_response({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+    
+    async def _readiness_check(self, request):
+        """Readiness check endpoint."""
+        return web.json_response({'status': 'ready', 'timestamp': datetime.now().isoformat()})
+    
+    async def start(self):
+        """Start the health check server."""
+        self.logger.info(f"Starting health check server on port {self.port}")
+        self.runner = web.AppRunner(self.app)
+        await self.runner.setup()
+        self.site = web.TCPSite(self.runner, '0.0.0.0', self.port)
+        await self.site.start()
+        self.logger.info(f"✅ Health check server started on port {self.port}")
+    
+    async def stop(self):
+        """Stop the health check server."""
+        if self.site:
+            await self.site.stop()
+        if self.runner:
+            await self.runner.cleanup()
+        self.logger.info("✅ Health check server stopped")
+
+
 class DNSMonitorService:
     """Main service that orchestrates all components."""
     
@@ -61,6 +105,7 @@ class DNSMonitorService:
         self.db_manager = None
         self.dns_monitor = None
         self.discord_bot = None
+        self.health_server = HealthCheckServer()
         self._shutdown_event = asyncio.Event()
     
     async def initialize(self):
@@ -111,6 +156,9 @@ class DNSMonitorService:
         self.logger.info("Starting DNS Monitor Service...")
         
         try:
+            # Start health check server first
+            await self.health_server.start()
+            
             # Start DNS monitoring
             await self.dns_monitor.start_monitoring()
             self.logger.info("✅ DNS monitoring started")
@@ -181,6 +229,10 @@ class DNSMonitorService:
             if self.db_manager:
                 await self.db_manager.close()
                 self.logger.info("✅ Database closed")
+            
+            # Stop health server
+            if self.health_server:
+                await self.health_server.stop()
             
             self.logger.info("✅ Service stopped successfully")
             

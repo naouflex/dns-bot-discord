@@ -13,6 +13,7 @@ RUN apt-get update \
         gcc \
         libc6-dev \
         libffi-dev \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -24,6 +25,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Expose health check port
+EXPOSE 8080
+
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
@@ -31,7 +35,7 @@ USER app
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import asyncio; import sys; sys.exit(0)"
+    CMD curl -f http://localhost:8080/health || exit 1
 
 # Run the application
 CMD ["python", "main.py"]
