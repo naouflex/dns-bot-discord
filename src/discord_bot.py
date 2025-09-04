@@ -617,6 +617,38 @@ voting_manager = None
 settings = get_settings()
 
 
+def is_allowed_channel(interaction: discord.Interaction) -> bool:
+    """Check if the interaction is in the allowed channel."""
+    if not settings.discord_channel_id:
+        # If no specific channel is configured, allow in any channel
+        return True
+    
+    try:
+        allowed_channel_id = int(settings.discord_channel_id)
+        return interaction.channel_id == allowed_channel_id
+    except (ValueError, AttributeError):
+        # If channel ID is invalid, allow in any channel
+        logger.warning(f"Invalid DISCORD_CHANNEL_ID configured: {settings.discord_channel_id}")
+        return True
+
+
+async def check_channel_permission(interaction: discord.Interaction) -> bool:
+    """
+    Check if command can be used in current channel and respond with error if not.
+    Returns True if allowed, False if not allowed (and already responded with error).
+    """
+    if not is_allowed_channel(interaction):
+        channel_name = f"<#{settings.discord_channel_id}>" if settings.discord_channel_id else "the configured channel"
+        embed = discord.Embed(
+            title="❌ Wrong Channel",
+            description=f"This command can only be used in {channel_name}",
+            color=0xFF0000
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return False
+    return True
+
+
 def set_services(db_manager_instance, dns_monitor_instance):
     """Set the service instances."""
     global db_manager, dns_monitor, voting_manager
@@ -667,6 +699,9 @@ async def on_app_command_error(interaction: discord.Interaction, error):
 @bot.tree.command(name="ping", description="Test bot response time and service health")
 async def ping_slash(interaction: discord.Interaction):
     """Test bot response time and service health."""
+    if not await check_channel_permission(interaction):
+        return
+        
     import time
     start_time = time.time()
     
@@ -754,6 +789,9 @@ async def ping_slash(interaction: discord.Interaction):
 @bot.tree.command(name="help", description="Show help information")
 async def help_slash(interaction: discord.Interaction):
     """Show help information."""
+    if not await check_channel_permission(interaction):
+        return
+        
     embed = discord.Embed(
         title="🤖 DNS Monitor Bot Help",
         description="Monitor DNS changes with user-controlled spam prevention",
@@ -808,6 +846,9 @@ async def help_slash(interaction: discord.Interaction):
 @bot.tree.command(name="list", description="List all monitored domains with pagination")
 async def list_slash(interaction: discord.Interaction):
     """List all monitored domains with pagination support."""
+    if not await check_channel_permission(interaction):
+        return
+        
     # Send immediate response to prevent timeout
     await interaction.response.send_message("🔍 Loading monitored domains...")
     
@@ -848,6 +889,9 @@ async def list_slash(interaction: discord.Interaction):
 @bot.tree.command(name="add", description="Add a domain to DNS monitoring")
 async def add_slash(interaction: discord.Interaction, domain: str):
     """Add a domain to DNS monitoring."""
+    if not await check_channel_permission(interaction):
+        return
+        
     # Send immediate response to prevent timeout
     await interaction.response.send_message(f"🔍 Adding domain `{domain}` to monitoring... (This may take up to 20 seconds)")
     
@@ -889,6 +933,9 @@ async def add_slash(interaction: discord.Interaction, domain: str):
 @bot.tree.command(name="add-bulk", description="Add multiple domains to DNS monitoring (comma-separated)")
 async def add_bulk_slash(interaction: discord.Interaction, domains: str):
     """Add multiple domains to DNS monitoring."""
+    if not await check_channel_permission(interaction):
+        return
+        
     # Send immediate response to prevent timeout
     await interaction.response.send_message("🔍 Processing bulk domain addition... (This may take several minutes for multiple domains)")
     
@@ -1026,6 +1073,9 @@ async def add_bulk_slash(interaction: discord.Interaction, domains: str):
 @bot.tree.command(name="remove-bulk", description="Remove multiple domains from DNS monitoring (comma-separated)")
 async def remove_bulk_slash(interaction: discord.Interaction, domains: str):
     """Remove multiple domains from DNS monitoring."""
+    if not await check_channel_permission(interaction):
+        return
+        
     # Send immediate response to prevent timeout
     await interaction.response.send_message("🗑️ Processing bulk domain removal...")
     
@@ -1149,6 +1199,9 @@ async def remove_bulk_slash(interaction: discord.Interaction, domains: str):
 @bot.tree.command(name="remove-all", description="Remove ALL domains from monitoring (requires confirmation)")
 async def remove_all_slash(interaction: discord.Interaction, confirm: str = ""):
     """Remove all domains from DNS monitoring with confirmation."""
+    if not await check_channel_permission(interaction):
+        return
+        
     # Send immediate response to prevent timeout
     await interaction.response.send_message("🗑️ Processing remove-all request...")
     
@@ -1293,6 +1346,9 @@ async def remove_all_slash(interaction: discord.Interaction, confirm: str = ""):
 @bot.tree.command(name="remove", description="Remove a domain from DNS monitoring")
 async def remove_slash(interaction: discord.Interaction, domain: str):
     """Remove a domain from DNS monitoring."""
+    if not await check_channel_permission(interaction):
+        return
+        
     # Send immediate response to prevent timeout
     await interaction.response.send_message(f"🗑️ Removing domain `{domain}` from monitoring...")
     
@@ -1324,6 +1380,9 @@ async def remove_slash(interaction: discord.Interaction, domain: str):
 @bot.tree.command(name="resolve-votes", description="Manually resolve pending votes for IP addresses")
 async def resolve_votes_slash(interaction: discord.Interaction, action: str = "list"):
     """Manually resolve pending votes for IP addresses."""
+    if not await check_channel_permission(interaction):
+        return
+        
     await interaction.response.send_message(f"🗳️ Managing pending votes...")
     
     if not db_manager:
@@ -1440,6 +1499,9 @@ async def resolve_votes_slash(interaction: discord.Interaction, action: str = "l
 @bot.tree.command(name="info", description="Get comprehensive information about a monitored domain")
 async def info_slash(interaction: discord.Interaction, domain: str):
     """Get comprehensive information about a monitored domain."""
+    if not await check_channel_permission(interaction):
+        return
+        
     # Send immediate response to prevent timeout
     await interaction.response.send_message(f"🔍 Gathering comprehensive info for `{domain}`... (This may take up to 15 seconds)")
     
@@ -1661,6 +1723,9 @@ async def info_slash(interaction: discord.Interaction, domain: str):
 @bot.tree.command(name="status", description="Check current DNS status of a domain")
 async def status_slash(interaction: discord.Interaction, domain: str):
     """Check current DNS status of a domain."""
+    if not await check_channel_permission(interaction):
+        return
+        
     # Send immediate response to prevent timeout
     await interaction.response.send_message(f"🔍 Checking DNS status for `{domain}`... (This may take up to 15 seconds)")
     
